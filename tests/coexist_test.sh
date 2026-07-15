@@ -54,6 +54,22 @@ assert_file_contains() {
 setup_instance v5 v5.0.1 23505
 setup_instance v6 v6.0.0b4 23606
 
+occupied_command="${BIN_DIR}/occupied-snell"
+printf '#!/usr/bin/env bash\necho occupied\n' > "$occupied_command"
+chmod 755 "$occupied_command"
+if SNELL_COMMAND_PATH="$occupied_command" run_snell register-command >/dev/null 2>&1; then
+  echo "断言失败: 不应覆盖其他程序占用的短命令路径" >&2
+  exit 1
+fi
+[ "$("$occupied_command")" = "occupied" ]
+
+run_snell register-command >/dev/null
+[ -x "${BIN_DIR}/snell" ]
+output="$("${BIN_DIR}/snell" status-all)"
+assert_contains "$output" "v5.0.1"
+assert_contains "$output" "v6.0.0b4"
+run_snell register-command >/dev/null
+
 output="$(run_snell status-all)"
 assert_contains "$output" "v5"
 assert_contains "$output" "v5.0.1"

@@ -3,11 +3,11 @@
 # Snell v5 / v6 多实例配置管理面板 (Debian/Ubuntu, root)
 #
 # 常用命令:
-#   bash snell.sh                  打开交互式管理面板
-#   bash snell.sh install          安装 / 重装
-#   bash snell.sh status           查看运行概览
-#   bash snell.sh client [地址]    输出客户端配置
-#   bash snell.sh help             查看全部命令
+#   snell                          打开交互式管理面板
+#   snell v6 install               安装 / 重装 v6
+#   snell v5 status                查看 v5 运行概览
+#   snell v6 client [地址]         输出 v6 客户端配置
+#   snell help                     查看全部命令
 #
 set -euo pipefail
 
@@ -20,11 +20,13 @@ SNELL_PORT="${SNELL_PORT:-}"                  # 留空则随机选择 20000-4000
 SNELL_MODE="${SNELL_MODE:-default}"           # default / unshaped / unsafe-raw
 SNELL_IPV6_OVERRIDE="${SNELL_IPV6:-}"
 DOWNLOAD_BASE="${DOWNLOAD_BASE:-https://dl.nssurge.com/snell}"
+SNELL_MANAGER_URL="${SNELL_MANAGER_URL:-https://raw.githubusercontent.com/mikuuu3981/snell-click/main/snell.sh}"
 # -------------------------------------------
 
 SNELL_BASE_DIR="${SNELL_BASE_DIR:-/etc/snell}"
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
+SNELL_COMMAND_PATH="${SNELL_COMMAND_PATH:-${BIN_DIR}/snell}"
 BIN_PATH_OVERRIDE="${BIN_PATH:-}"
 CONF_DIR_OVERRIDE="${CONF_DIR:-}"
 CONF_PATH_OVERRIDE="${CONF_PATH:-}"
@@ -88,6 +90,62 @@ use_instance "$SNELL_PROTOCOL"
 
 need_root() {
   [ "$(id -u)" -eq 0 ] || { red "请使用 root 权限运行此操作。"; exit 1; }
+}
+
+is_snell_manager_script() {
+  local path="${1:-}"
+  [ -f "$path" ] && grep -Fq 'Snell v5 / v6 多实例配置管理面板' "$path" 2>/dev/null
+}
+
+register_short_command() {
+  local quiet="${1:-false}" source="${BASH_SOURCE[0]}" staged=""
+  need_root
+
+  if { [ -e "$SNELL_COMMAND_PATH" ] || [ -L "$SNELL_COMMAND_PATH" ]; } &&
+     ! [ "$source" -ef "$SNELL_COMMAND_PATH" ] &&
+     ! is_snell_manager_script "$SNELL_COMMAND_PATH"; then
+    red "无法注册短命令: ${SNELL_COMMAND_PATH} 已被其他程序占用。"
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$SNELL_COMMAND_PATH")"
+  if [ -e "$SNELL_COMMAND_PATH" ] && [ "$source" -ef "$SNELL_COMMAND_PATH" ]; then
+    chmod 755 "$SNELL_COMMAND_PATH"
+  elif [ -f "$source" ]; then
+    if [ -f "$SNELL_COMMAND_PATH" ] && cmp -s "$source" "$SNELL_COMMAND_PATH"; then
+      chmod 755 "$SNELL_COMMAND_PATH"
+    else
+      install -m 755 "$source" "$SNELL_COMMAND_PATH"
+    fi
+  else
+    staged="$(mktemp)"
+    if command -v curl >/dev/null 2>&1; then
+      if ! curl -fsSL "$SNELL_MANAGER_URL" -o "$staged"; then
+        rm -f "$staged"
+        red "短命令注册失败: 无法下载管理脚本。"
+        return 1
+      fi
+    elif command -v wget >/dev/null 2>&1; then
+      if ! wget -q -O "$staged" "$SNELL_MANAGER_URL"; then
+        rm -f "$staged"
+        red "短命令注册失败: 无法下载管理脚本。"
+        return 1
+      fi
+    else
+      rm -f "$staged"
+      red "短命令注册失败: 当前启动方式需要 curl 或 wget。"
+      return 1
+    fi
+    if ! bash -n "$staged"; then
+      rm -f "$staged"
+      red "短命令注册失败: 下载的管理脚本语法无效。"
+      return 1
+    fi
+    install -m 755 "$staged" "$SNELL_COMMAND_PATH"
+    rm -f "$staged"
+  fi
+
+  [ "$quiet" = "true" ] || success "短命令已注册: 以后可直接运行 snell"
 }
 
 have_systemd() {
@@ -1262,31 +1320,54 @@ multi_panel_header() {
   echo
 }
 
-menu() {
-  local choice detected answer
-  need_root
-  [ -t 0 ] || { red "交互式面板需要在终端中运行。"; return 1; }
+instance_selector_menu() {
+  local choice
   while true; do
     clear_screen
     multi_panel_header
-    echo "  1) 管理 Snell v5"
-    echo "  2) 管理 Snell v6"
-    echo "  3) 查看双实例详细状态"
-    echo "  4) 迁移旧版单实例"
-    echo "  0) 退出"
+    echo "选择要管理的实例"
+    echo "  1) Snell v5"
+    echo "  2) Snell v6"
+    echo "  0) 返回主菜单"
     echo
     read -r -p "请选择: " choice
     case "$choice" in
       1) use_instance v5; instance_menu ;;
       2) use_instance v6; instance_menu ;;
-      3)
+      0) return 0 ;;
+      *) yellow "无效选择。"; pause_screen ;;
+    esac
+  done
+}
+
+menu() {
+  local choice detected answer
+  need_root
+  [ -t 0 ] || { red "交互式面板需要在终端中运行。"; return 1; }
+  if ! register_short_command true; then
+    echo
+    warn "管理面板仍可继续使用；请处理上面的短命令冲突后运行 register-command。"
+    pause_screen
+  fi
+  while true; do
+    clear_screen
+    multi_panel_header
+    echo "  1) 管理 Snell"
+    echo "  2) 查看双实例详细状态"
+    echo "  3) 迁移旧版单实例"
+    echo "  0) 退出"
+    echo
+    read -r -p "请选择: " choice
+    case "$choice" in
+      1) instance_selector_menu ;;
+      2)
         clear_screen
         use_instance v5; show_status || true
         echo
         use_instance v6; show_status || true
         pause_screen
         ;;
-      4)
+      3)
         if ! legacy_has_files; then
           yellow "没有检测到旧版单实例。"
           pause_screen
@@ -1311,12 +1392,13 @@ usage() {
 Snell v5 / v6 多实例安装与配置管理
 
 用法:
-  bash snell.sh [v5|v6] [命令] [参数]
+  snell [v5|v6] [命令] [参数]
 
 命令:
-  menu                       打开双实例交互面板（默认）
+  menu                       打开统一交互面板（默认）
   manage                     打开所选版本的实例面板
   status-all                 查看 v5 与 v6 概览
+  register-command           注册 / 更新 snell 短命令
   migrate [v5|v6]            将旧 snell.service 迁移为独立实例
   install                    安装或重装所选实例
   uninstall                  卸载并清理所选实例
@@ -1341,14 +1423,15 @@ Snell v5 / v6 多实例安装与配置管理
 
 可用环境变量:
   SNELL_PROTOCOL, SNELL_VERSION, SNELL_V5_VERSION, SNELL_V6_VERSION,
-  SNELL_PORT, SNELL_MODE, SNELL_IPV6, DOWNLOAD_BASE, NO_COLOR
+  SNELL_PORT, SNELL_MODE, SNELL_IPV6, DOWNLOAD_BASE, SNELL_COMMAND_PATH,
+  SNELL_MANAGER_URL, NO_COLOR
 
 示例:
-  bash snell.sh v5 install
-  bash snell.sh v6 install
-  bash snell.sh status-all
-  bash snell.sh migrate
-  bash snell.sh v5 client snell.example.com
+  snell v5 install
+  snell v6 install
+  snell status-all
+  snell migrate
+  snell v5 client snell.example.com
 EOF
 }
 
@@ -1377,6 +1460,7 @@ case "${1:-menu}" in
   restore)      restore_backup "${2:-}" ;;
   update)       update_server "${2:-$SNELL_VERSION}" ;;
   status-all)   show_all_status ;;
+  register-command) register_short_command ;;
   migrate)      migrate_legacy "${2:-}" ;;
   manage)       instance_menu ;;
   menu)         menu ;;

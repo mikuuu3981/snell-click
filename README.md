@@ -5,11 +5,12 @@
 ## 快速开始
 
 ```bash
-chmod +x snell.sh
-sudo ./snell.sh
+curl -fsSL https://raw.githubusercontent.com/mikuuu3981/snell-click/main/snell.sh -o /tmp/snell.sh && sudo bash /tmp/snell.sh
 ```
 
-主面板会同时显示 v5 和 v6 的状态。分别进入“管理 Snell v5”和“管理 Snell v6”进行安装，脚本会为两个实例选择不同的可用端口。
+首次打开主面板会自动注册 `/usr/local/bin/snell` 短命令，以后直接运行 `sudo snell` 即可。也可以在脚本目录运行 `sudo ./snell.sh register-command` 手动注册或更新短命令。
+
+主面板会同时显示 v5 和 v6 的状态。进入统一的“管理 Snell”入口后选择 v5 或 v6，脚本会为两个实例选择不同的可用端口。
 
 v5 默认采用官方向导一致的 IPv4 监听，v6 默认启用 IPv4/IPv6 双栈。两个实例都可以在配置菜单中单独调整 IPv6。
 
@@ -53,27 +54,27 @@ v5 默认采用官方向导一致的 IPv4 监听，v6 默认启用 IPv4/IPv6 双
 在命令前添加 `v5` 或 `v6` 选择实例；省略时保持向后兼容，默认管理 v6。
 
 ```bash
-sudo ./snell.sh status-all
+sudo snell status-all
 
-sudo ./snell.sh v5 install
-sudo ./snell.sh v6 install
+sudo snell v5 install
+sudo snell v6 install
 
-sudo ./snell.sh v5 status
-sudo ./snell.sh v6 status
-sudo ./snell.sh v5 client v5.example.com
-sudo ./snell.sh v6 client v6.example.com
+sudo snell v5 status
+sudo snell v6 status
+sudo snell v5 client v5.example.com
+sudo snell v6 client v6.example.com
 
-sudo ./snell.sh v5 set-port 23505
-sudo ./snell.sh v6 set-port 23606
-sudo ./snell.sh v5 set-psk
-sudo ./snell.sh v6 set-mode unshaped
-sudo ./snell.sh v5 restart
-sudo ./snell.sh v6 diagnose
-sudo ./snell.sh v5 update v5.0.1
-sudo ./snell.sh v6 update v6.0.0b4
+sudo snell v5 set-port 23505
+sudo snell v6 set-port 23606
+sudo snell v5 set-psk
+sudo snell v6 set-mode unshaped
+sudo snell v5 restart
+sudo snell v6 diagnose
+sudo snell v5 update v5.0.1
+sudo snell v6 update v6.0.0b4
 ```
 
-其他配置命令 `set-ipv6`、`set-dns`、`set-dns-preference`、`set-egress`、`logs`、`backup` 和 `restore` 同样接受版本前缀。运行 `./snell.sh help` 查看完整列表。
+其他配置命令 `set-ipv6`、`set-dns`、`set-dns-preference`、`set-egress`、`logs`、`backup` 和 `restore` 同样接受版本前缀。运行 `snell help` 查看完整列表。
 
 ## 旧版迁移
 
@@ -88,14 +89,14 @@ sudo ./snell.sh v6 update v6.0.0b4
 新面板检测到旧实例后会显示迁移入口，也可以直接执行：
 
 ```bash
-sudo ./snell.sh migrate
+sudo snell migrate
 ```
 
 脚本会从版本文件或二进制识别 v5/v6，保留原端口、PSK、高级配置和备份，然后迁移到对应独立实例。若新服务启动失败，迁移会被取消并恢复旧 `snell.service`。无法识别版本时可以明确指定：
 
 ```bash
-sudo ./snell.sh migrate v5
-sudo ./snell.sh migrate v6
+sudo snell migrate v5
+sudo snell migrate v6
 ```
 
 ## 配置与安全
@@ -109,7 +110,7 @@ SNELL_PROTOCOL=v5 \
 SNELL_VERSION=v5.0.1 \
 SNELL_PORT=23505 \
 SNELL_IPV6=false \
-sudo -E ./snell.sh install
+sudo -E snell install
 ```
 
 默认版本也可以分别通过 `SNELL_V5_VERSION` 和 `SNELL_V6_VERSION` 覆盖。PSK 必须为 12-255 个字符；脚本默认生成 32 位随机十六进制 PSK。
