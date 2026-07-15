@@ -471,9 +471,9 @@ transport_label() {
 pick_port() {
   local candidate attempts=0
   if [ -n "$SNELL_PORT" ]; then
-    validate_port "$SNELL_PORT" || { red "SNELL_PORT 必须是 1-65535 的整数。"; return 1; }
+    validate_port "$SNELL_PORT" || { red "SNELL_PORT 必须是 1-65535 的整数。" >&2; return 1; }
     if port_in_use "$SNELL_PORT"; then
-      red "端口 ${SNELL_PORT} 已被占用。"
+      red "端口 ${SNELL_PORT} 已被占用。" >&2
       return 1
     fi
     echo "$SNELL_PORT"
@@ -488,8 +488,62 @@ pick_port() {
     fi
     attempts=$((attempts + 1))
   done
-  red "未能找到可用的随机端口。"
+  red "未能找到可用的随机端口。" >&2
   return 1
+}
+
+install_port_available() {
+  local requested="$1" current=""
+  if ! port_in_use "$requested"; then
+    return 0
+  fi
+  if is_installed && service_is_active; then
+    current="$(current_port)"
+    [ "$requested" = "$current" ] && return 0
+  fi
+  return 1
+}
+
+choose_install_port() {
+  local requested="${SNELL_PORT:-}" current=""
+  if is_installed; then
+    current="$(current_port)"
+    validate_port "$current" || current=""
+  fi
+
+  if [ -n "$requested" ]; then
+    validate_port "$requested" || { red "SNELL_PORT 必须是 1-65535 的整数。" >&2; return 1; }
+    install_port_available "$requested" || { red "端口 ${requested} 已被占用。" >&2; return 1; }
+    printf '%s\n' "$requested"
+    return 0
+  fi
+
+  if [ -t 0 ]; then
+    while true; do
+      if [ -n "$current" ]; then
+        read -r -p "监听端口 [当前 ${current}，留空保留]: " requested
+        requested="${requested:-$current}"
+      else
+        read -r -p "监听端口 [留空自动选择 20000-40000]: " requested
+        if [ -z "$requested" ]; then
+          pick_port
+          return
+        fi
+      fi
+      if ! validate_port "$requested"; then
+        red "端口必须是 1-65535 的整数，请重新输入。" >&2
+        continue
+      fi
+      if ! install_port_available "$requested"; then
+        red "端口 ${requested} 已被占用，请选择其他端口。" >&2
+        continue
+      fi
+      printf '%s\n' "$requested"
+      return 0
+    done
+  fi
+
+  pick_port
 }
 
 write_config() {
@@ -624,6 +678,7 @@ show_existing() {
 }
 
 do_install() {
+  local answer psk port staged_binary
   need_root
   have_systemd || { red "未检测到 systemd，无法安装服务。"; return 1; }
   if [ "$SNELL_PROTOCOL" = "v6" ]; then
@@ -639,27 +694,29 @@ do_install() {
     echo
     show_existing
     echo
-    local answer
-    read -r -p "重装 Snell ${SNELL_PROTOCOL} 会生成新的端口和 PSK，是否继续? [y/N] " answer
+    read -r -p "重装 Snell ${SNELL_PROTOCOL} 会重新生成 PSK，是否继续? [y/N] " answer
     case "${answer:-N}" in
       y|Y|yes|YES) backup_config "pre-reinstall" >/dev/null || true ;;
       *) yellow "已取消。"; return 0 ;;
     esac
   fi
 
-  local psk port staged_binary
-  ensure_dependencies
-  psk="$(gen_psk)"
-  port="$(pick_port)"
-  staged_binary="$(mktemp)"
+  port="$(choose_install_port)" || return 1
+  info "监听端口: ${port}"
+  ensure_dependencies || return 1
+  psk="$(gen_psk)" || return 1
+  staged_binary="$(mktemp)" || { red "无法创建临时文件。"; return 1; }
   rm -f "$staged_binary"
 
-  download_binary "$SNELL_VERSION" "$staged_binary"
-  mkdir -p "$(dirname "$BIN_PATH")" "$(dirname "$SERVICE_PATH")"
-  install -m 755 "$staged_binary" "$BIN_PATH"
+  if ! download_binary "$SNELL_VERSION" "$staged_binary"; then
+    rm -f "$staged_binary"
+    return 1
+  fi
+  mkdir -p "$(dirname "$BIN_PATH")" "$(dirname "$SERVICE_PATH")" || return 1
+  install -m 755 "$staged_binary" "$BIN_PATH" || { rm -f "$staged_binary"; return 1; }
   rm -f "$staged_binary"
-  write_config "$port" "$psk" "$SNELL_IPV6" "$SNELL_MODE" "" "" ""
-  write_service "$SNELL_VERSION"
+  write_config "$port" "$psk" "$SNELL_IPV6" "$SNELL_MODE" "" "" "" || return 1
+  write_service "$SNELL_VERSION" || return 1
   printf '%s\n' "$SNELL_VERSION" > "$VERSION_PATH"
   chmod 600 "$VERSION_PATH"
 
@@ -1364,9 +1421,9 @@ instance_menu() {
     clear_screen
     panel_header
     section_title "实例操作"
-    menu_option 1 "安装 / 重装 Snell ${SNELL_PROTOCOL}"
+    menu_option 1 "安装 / 重装 Snell ${SNELL_PROTOCOL}（可指定端口）"
     menu_option 2 "查看运行概览"
-    menu_option 3 "配置管理"
+    menu_option 3 "配置管理（端口 / PSK / 网络）"
     menu_option 4 "生成客户端配置"
     menu_option 5 "服务控制"
     menu_option 6 "更新服务端版本" accent
@@ -1565,7 +1622,7 @@ Snell v5 / v6 多实例安装与配置管理
   register-command           注册 / 更新 snell 短命令
   self-update                检查并升级管理面板
   migrate [v5|v6]            将旧 snell.service 迁移为独立实例
-  install                    安装或重装所选实例
+  install                    安装或重装所选实例；交互时可指定端口
   uninstall                  卸载并清理所选实例
   status                     查看运行概览
   client [服务器地址]        输出 Surge 与 mihomo 客户端配置
