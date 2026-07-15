@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ -r "${CONF_PATH:-}" ]; then
+  port="$(awk -F: '/^[[:space:]]*listen[[:space:]]*=/ { print $NF; exit }' "$CONF_PATH" | tr -d '[:space:]')"
+  [ -n "$port" ] && printf 'LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\n' "$port"
+fi

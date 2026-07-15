@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+  is-active|is-enabled) exit 0 ;;
+  show) echo "0" ;;
+  restart)
+    if [ -n "${SYSTEMCTL_FAIL_FILE:-}" ] && [ -e "$SYSTEMCTL_FAIL_FILE" ]; then
+      exit 1
+    fi
+    ;;
+  *) exit 0 ;;
+esac
