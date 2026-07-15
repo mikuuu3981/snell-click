@@ -7,6 +7,7 @@
 #   snell v6 install               安装 / 重装 v6
 #   snell v5 status                查看 v5 运行概览
 #   snell v6 client [地址]         输出 v6 客户端配置
+#   snell self-update              升级管理面板
 #   snell help                     查看全部命令
 #
 set -euo pipefail
@@ -74,9 +75,11 @@ use_instance() {
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   C_RED='\033[31m'; C_GREEN='\033[32m'; C_YELLOW='\033[33m'
-  C_CYAN='\033[36m'; C_BOLD='\033[1m'; C_RESET='\033[0m'
+  C_BLUE='\033[94m'; C_MAGENTA='\033[35m'; C_CYAN='\033[36m'
+  C_WHITE='\033[97m'; C_GRAY='\033[90m'; C_BOLD='\033[1m'; C_RESET='\033[0m'
 else
-  C_RED=''; C_GREEN=''; C_YELLOW=''; C_CYAN=''; C_BOLD=''; C_RESET=''
+  C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_MAGENTA=''; C_CYAN=''
+  C_WHITE=''; C_GRAY=''; C_BOLD=''; C_RESET=''
 fi
 
 red()    { printf '%b\n' "${C_RED}$*${C_RESET}"; }
@@ -85,6 +88,34 @@ yellow() { printf '%b\n' "${C_YELLOW}$*${C_RESET}"; }
 info()   { printf '%b\n' "${C_CYAN}[*]${C_RESET} $*"; }
 success(){ printf '%b\n' "${C_GREEN}[ok]${C_RESET} $*"; }
 warn()   { printf '%b\n' "${C_YELLOW}[!]${C_RESET} $*"; }
+
+section_title() {
+  printf '%b%s%b\n' "${C_BOLD}${C_WHITE}" "$1" "$C_RESET"
+  printf '%b%s%b\n' "$C_GRAY" '────────────────────────────────────────' "$C_RESET"
+}
+
+menu_option() {
+  local number="$1" label="$2" style="${3:-normal}" color="$C_CYAN"
+  case "$style" in
+    accent) color="$C_MAGENTA" ;;
+    danger) color="$C_RED" ;;
+    back) color="$C_GRAY" ;;
+  esac
+  printf '  %b%-2s%b %s\n' "${color}${C_BOLD}" "${number})" "$C_RESET" "$label"
+}
+
+state_color() {
+  case "${1:-}" in
+    运行中|已安装|已注册|是) printf '%s' "$C_GREEN" ;;
+    已停止|未安装|否) printf '%s' "$C_YELLOW" ;;
+    *) printf '%s' "$C_RED" ;;
+  esac
+}
+
+detail_row() {
+  local label="$1" value="$2" color="${3:-$C_WHITE}"
+  printf '  %b%-14s%b %b%s%b\n' "$C_GRAY" "$label" "$C_RESET" "$color" "$value" "$C_RESET"
+}
 
 use_instance "$SNELL_PROTOCOL"
 
@@ -95,6 +126,52 @@ need_root() {
 is_snell_manager_script() {
   local path="${1:-}"
   [ -f "$path" ] && grep -Fq 'Snell v5 / v6 多实例配置管理面板' "$path" 2>/dev/null
+}
+
+fetch_manager_script() {
+  local destination="$1" local_source=""
+  if [ -f "$SNELL_MANAGER_URL" ]; then
+    cp "$SNELL_MANAGER_URL" "$destination" || return 1
+    return 0
+  fi
+  if [[ "$SNELL_MANAGER_URL" == file://* ]]; then
+    local_source="${SNELL_MANAGER_URL#file://}"
+    if [ -f "$local_source" ]; then
+      cp "$local_source" "$destination" || return 1
+      return 0
+    fi
+  fi
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$SNELL_MANAGER_URL" -o "$destination"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "$destination" "$SNELL_MANAGER_URL"
+  else
+    red "下载管理脚本需要 curl 或 wget。"
+    return 1
+  fi
+}
+
+validate_manager_script() {
+  local path="$1"
+  is_snell_manager_script "$path" && bash -n "$path"
+}
+
+install_manager_script() {
+  local source="$1" target_temp
+  if ! mkdir -p "$(dirname "$SNELL_COMMAND_PATH")"; then
+    return 1
+  fi
+  if ! target_temp="$(mktemp "${SNELL_COMMAND_PATH}.tmp.XXXXXX")"; then
+    return 1
+  fi
+  if ! install -m 755 "$source" "$target_temp"; then
+    rm -f "$target_temp"
+    return 1
+  fi
+  if ! mv -f "$target_temp" "$SNELL_COMMAND_PATH"; then
+    rm -f "$target_temp"
+    return 1
+  fi
 }
 
 register_short_command() {
@@ -108,44 +185,83 @@ register_short_command() {
     return 1
   fi
 
-  mkdir -p "$(dirname "$SNELL_COMMAND_PATH")"
   if [ -e "$SNELL_COMMAND_PATH" ] && [ "$source" -ef "$SNELL_COMMAND_PATH" ]; then
-    chmod 755 "$SNELL_COMMAND_PATH"
+    if ! chmod 755 "$SNELL_COMMAND_PATH"; then
+      red "短命令权限修复失败: ${SNELL_COMMAND_PATH}"
+      return 1
+    fi
   elif [ -f "$source" ]; then
     if [ -f "$SNELL_COMMAND_PATH" ] && cmp -s "$source" "$SNELL_COMMAND_PATH"; then
-      chmod 755 "$SNELL_COMMAND_PATH"
-    else
-      install -m 755 "$source" "$SNELL_COMMAND_PATH"
+      if ! chmod 755 "$SNELL_COMMAND_PATH"; then
+        red "短命令权限修复失败: ${SNELL_COMMAND_PATH}"
+        return 1
+      fi
+    elif ! install_manager_script "$source"; then
+      red "短命令注册失败: 无法写入 ${SNELL_COMMAND_PATH}。"
+      return 1
     fi
   else
-    staged="$(mktemp)"
-    if command -v curl >/dev/null 2>&1; then
-      if ! curl -fsSL "$SNELL_MANAGER_URL" -o "$staged"; then
-        rm -f "$staged"
-        red "短命令注册失败: 无法下载管理脚本。"
-        return 1
-      fi
-    elif command -v wget >/dev/null 2>&1; then
-      if ! wget -q -O "$staged" "$SNELL_MANAGER_URL"; then
-        rm -f "$staged"
-        red "短命令注册失败: 无法下载管理脚本。"
-        return 1
-      fi
-    else
-      rm -f "$staged"
-      red "短命令注册失败: 当前启动方式需要 curl 或 wget。"
+    if ! staged="$(mktemp)"; then
+      red "短命令注册失败: 无法创建临时文件。"
       return 1
     fi
-    if ! bash -n "$staged"; then
+    if ! fetch_manager_script "$staged"; then
       rm -f "$staged"
-      red "短命令注册失败: 下载的管理脚本语法无效。"
+      red "短命令注册失败: 无法下载管理脚本。"
       return 1
     fi
-    install -m 755 "$staged" "$SNELL_COMMAND_PATH"
+    if ! validate_manager_script "$staged"; then
+      rm -f "$staged"
+      red "短命令注册失败: 下载的文件不是有效的 Snell 管理脚本。"
+      return 1
+    fi
+    if ! install_manager_script "$staged"; then
+      rm -f "$staged"
+      red "短命令注册失败: 无法写入 ${SNELL_COMMAND_PATH}。"
+      return 1
+    fi
     rm -f "$staged"
   fi
 
   [ "$quiet" = "true" ] || success "短命令已注册: 以后可直接运行 snell"
+}
+
+update_manager() {
+  local staged
+  need_root
+  if { [ -e "$SNELL_COMMAND_PATH" ] || [ -L "$SNELL_COMMAND_PATH" ]; } &&
+     ! is_snell_manager_script "$SNELL_COMMAND_PATH"; then
+    red "无法升级面板: ${SNELL_COMMAND_PATH} 已被其他程序占用。"
+    return 1
+  fi
+
+  if ! staged="$(mktemp)"; then
+    red "管理面板升级失败: 无法创建临时文件。"
+    return 1
+  fi
+  info "正在获取最新管理面板..."
+  if ! fetch_manager_script "$staged"; then
+    rm -f "$staged"
+    red "管理面板下载失败，请检查网络连接。"
+    return 1
+  fi
+  if ! validate_manager_script "$staged"; then
+    rm -f "$staged"
+    red "升级已取消: 下载的文件不是有效的 Snell 管理脚本。"
+    return 1
+  fi
+  if [ -f "$SNELL_COMMAND_PATH" ] && cmp -s "$staged" "$SNELL_COMMAND_PATH"; then
+    rm -f "$staged"
+    success "当前管理面板已是最新版本。"
+    return 0
+  fi
+  if ! install_manager_script "$staged"; then
+    rm -f "$staged"
+    red "管理面板安装失败，现有脚本未被修改。"
+    return 1
+  fi
+  rm -f "$staged"
+  success "管理面板已升级；退出后重新运行 snell 即可使用，v5/v6 配置与服务均保持不变。"
 }
 
 have_systemd() {
@@ -770,6 +886,7 @@ set_egress_interface() {
 
 show_status() {
   local state enabled version port psk mode ipv6 listen_state pid uptime ip4 dns dns_preference egress_interface
+  local status_style enabled_style
   if ! has_installation_files; then
     yellow "Snell 尚未安装。"
     return 1
@@ -811,20 +928,22 @@ show_status() {
     uptime="$(ps -o etime= -p "$pid" 2>/dev/null | xargs || true)"
   fi
   ip4="$(public_ip 4)"
+  status_style="$(state_color "$state")"
+  enabled_style="$(state_color "$enabled")"
 
-  printf '%b\n' "${C_BOLD}Snell ${SNELL_PROTOCOL} 运行概览${C_RESET}"
-  printf '  %-10s %s\n' "状态" "$state"
-  printf '  %-10s %s\n' "开机自启" "$enabled"
-  printf '  %-10s %s\n' "版本" "${version:-unknown}"
-  printf '  %-10s %s\n' "监听" "${listen_state}"
-  [ "$SNELL_PROTOCOL" = "v6" ] && printf '  %-10s %s\n' "模式" "${mode:-未知}"
-  printf '  %-10s %s\n' "IPv6" "${ipv6:-未知}"
-  [ -n "$dns" ] && printf '  %-10s %s\n' "自定义 DNS" "$dns"
-  [ -n "$dns_preference" ] && printf '  %-10s %s\n' "DNS IP 偏好" "$dns_preference"
-  [ -n "$egress_interface" ] && printf '  %-10s %s\n' "出口网卡" "$egress_interface"
-  printf '  %-10s %s\n' "PSK" "$(masked_psk "$psk")"
-  [ -n "$ip4" ] && printf '  %-10s %s\n' "公网 IPv4" "$ip4"
-  [ -n "$pid" ] && printf '  %-10s %s%s\n' "进程" "PID ${pid}" "${uptime:+ · 已运行 ${uptime}}"
+  section_title "Snell ${SNELL_PROTOCOL} 运行概览"
+  detail_row "状态" "$state" "$status_style"
+  detail_row "开机自启" "$enabled" "$enabled_style"
+  detail_row "版本" "${version:-unknown}" "$C_MAGENTA"
+  detail_row "监听" "$listen_state" "$C_YELLOW"
+  [ "$SNELL_PROTOCOL" = "v6" ] && detail_row "模式" "${mode:-未知}" "$C_BLUE"
+  detail_row "IPv6" "${ipv6:-未知}" "$C_CYAN"
+  [ -n "$dns" ] && detail_row "自定义 DNS" "$dns"
+  [ -n "$dns_preference" ] && detail_row "DNS IP 偏好" "$dns_preference"
+  [ -n "$egress_interface" ] && detail_row "出口网卡" "$egress_interface"
+  detail_row "PSK" "$(masked_psk "$psk")" "$C_GRAY"
+  [ -n "$ip4" ] && detail_row "公网 IPv4" "$ip4" "$C_CYAN"
+  [ -n "$pid" ] && detail_row "进程" "PID ${pid}${uptime:+ · 已运行 ${uptime}}" "$C_GREEN"
 }
 
 client_address() {
@@ -845,7 +964,7 @@ show_client_config() {
   psk="$(current_psk)"
   mode="$(current_mode)"
 
-  printf '%b\n' "${C_BOLD}Surge${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}Surge${C_RESET}"
   if [ "$SNELL_PROTOCOL" = "v6" ]; then
     printf 'Snell-v6 = snell, %s, %s, psk=%s, version=6, mode=%s, reuse=true, tfo=true\n' \
       "$address" "$port" "$psk" "$mode"
@@ -854,7 +973,7 @@ show_client_config() {
       "$address" "$port" "$psk"
   fi
   echo
-  printf '%b\n' "${C_BOLD}mihomo / Clash Meta${C_RESET}"
+  printf '%b\n' "${C_MAGENTA}${C_BOLD}mihomo / Clash Meta${C_RESET}"
   cat <<EOF
 - name: Snell-${SNELL_PROTOCOL}
   type: snell
@@ -1050,7 +1169,7 @@ clear_screen() {
 }
 
 panel_header() {
-  local state="未安装" version="-" port="-"
+  local state="未安装" version="-" port="-" status_style
   if is_installed; then
     service_is_active && state="运行中" || state="已停止"
     version="$(installed_version)"
@@ -1058,10 +1177,14 @@ panel_header() {
   elif has_installation_files; then
     state="安装不完整"
   fi
-  printf '%b\n' "${C_BOLD}┌──────────────────────────────────────┐${C_RESET}"
-  printf '%b\n' "${C_BOLD}│       Snell ${SNELL_PROTOCOL} 实例管理面板        │${C_RESET}"
-  printf '%b\n' "${C_BOLD}└──────────────────────────────────────┘${C_RESET}"
-  printf '  状态: %-10s 版本: %-12s 端口: %s\n\n' "$state" "$version" "$port"
+  status_style="$(state_color "$state")"
+  printf '%b\n' "${C_CYAN}${C_BOLD}╭────────────────────────────────────────────╮${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}│${C_RESET}          ${C_WHITE}${C_BOLD}Snell ${SNELL_PROTOCOL} 实例管理控制台${C_RESET}           ${C_CYAN}${C_BOLD}│${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}╰────────────────────────────────────────────╯${C_RESET}"
+  printf '  %b状态%b  %b%-10s%b  %b版本%b  %b%-12s%b  %b端口%b  %b%s%b\n\n' \
+    "$C_GRAY" "$C_RESET" "$status_style" "$state" "$C_RESET" \
+    "$C_GRAY" "$C_RESET" "$C_MAGENTA" "$version" "$C_RESET" \
+    "$C_GRAY" "$C_RESET" "$C_YELLOW" "$port" "$C_RESET"
 }
 
 configuration_menu() {
@@ -1069,20 +1192,20 @@ configuration_menu() {
   while true; do
     clear_screen
     panel_header
-    echo "配置管理"
-    echo "  1) 修改监听端口"
-    echo "  2) 重新生成 PSK"
-    echo "  3) 设置自定义 PSK"
+    section_title "配置管理"
+    menu_option 1 "修改监听端口"
+    menu_option 2 "重新生成 PSK"
+    menu_option 3 "设置自定义 PSK"
     if [ "$SNELL_PROTOCOL" = "v6" ]; then
-      echo "  4) 切换运行模式"
+      menu_option 4 "切换运行模式"
     else
-      echo "  4) 运行模式（仅 v6）"
+      menu_option 4 "运行模式（仅 v6）" back
     fi
-    echo "  5) 开启 / 关闭 IPv6"
-    echo "  6) 设置自定义 DNS"
-    echo "  7) 设置 DNS IP 偏好"
-    echo "  8) 绑定出口网卡"
-    echo "  0) 返回"
+    menu_option 5 "开启 / 关闭 IPv6"
+    menu_option 6 "设置自定义 DNS"
+    menu_option 7 "设置 DNS IP 偏好"
+    menu_option 8 "绑定出口网卡"
+    menu_option 0 "返回" back
     echo
     read -r -p "请选择: " choice
     case "$choice" in
@@ -1106,9 +1229,9 @@ configuration_menu() {
         if [ "$SNELL_PROTOCOL" = "v5" ]; then
           yellow "Snell v5 没有可管理的 mode 参数。"
         else
-          echo "  1) default    兼容性优先"
-          echo "  2) unshaped   不使用流量整形"
-          echo "  3) unsafe-raw 原始模式"
+          menu_option 1 "default    兼容性优先"
+          menu_option 2 "unshaped   不使用流量整形"
+          menu_option 3 "unsafe-raw 原始模式"
           read -r -p "请选择 [当前 $(current_mode)]: " value
           case "$value" in
             1) set_mode default || true ;;
@@ -1133,12 +1256,12 @@ configuration_menu() {
         pause_screen
         ;;
       7)
-        echo "  1) default"
-        echo "  2) prefer-ipv4"
-        echo "  3) prefer-ipv6"
-        echo "  4) ipv4-only"
-        echo "  5) ipv6-only"
-        echo "  6) 清除显式设置"
+        menu_option 1 "default"
+        menu_option 2 "prefer-ipv4"
+        menu_option 3 "prefer-ipv6"
+        menu_option 4 "ipv4-only"
+        menu_option 5 "ipv6-only"
+        menu_option 6 "清除显式设置" back
         read -r -p "请选择 [当前 $(current_dns_preference | sed 's/^$/default/')]: " value
         case "$value" in
           1) set_dns_preference default || true ;;
@@ -1168,13 +1291,13 @@ service_menu() {
   while true; do
     clear_screen
     panel_header
-    echo "服务控制"
-    echo "  1) 启动"
-    echo "  2) 停止"
-    echo "  3) 重启"
-    echo "  4) 开启开机自启"
-    echo "  5) 关闭开机自启"
-    echo "  0) 返回"
+    section_title "服务控制"
+    menu_option 1 "启动"
+    menu_option 2 "停止"
+    menu_option 3 "重启"
+    menu_option 4 "开启开机自启"
+    menu_option 5 "关闭开机自启"
+    menu_option 0 "返回" back
     echo
     read -r -p "请选择: " choice
     case "$choice" in
@@ -1195,10 +1318,10 @@ backup_menu() {
   while true; do
     clear_screen
     panel_header
-    echo "备份与恢复"
-    echo "  1) 创建配置备份"
-    echo "  2) 恢复配置备份"
-    echo "  0) 返回"
+    section_title "备份与恢复"
+    menu_option 1 "创建配置备份"
+    menu_option 2 "恢复配置备份"
+    menu_option 0 "返回" back
     echo
     read -r -p "请选择: " choice
     case "$choice" in
@@ -1215,8 +1338,8 @@ backup_menu() {
           yellow "没有可用备份。"; pause_screen; continue
         fi
         echo
-        for choice in "${!backups[@]}"; do printf '  %d) %s\n' "$((choice + 1))" "$(basename "${backups[$choice]}")"; done
-        echo "  0) 取消"
+        for choice in "${!backups[@]}"; do menu_option "$((choice + 1))" "$(basename "${backups[$choice]}")"; done
+        menu_option 0 "取消" back
         read -r -p "选择备份: " choice
         if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && [ "$choice" -le "${#backups[@]}" ]; then
           backup="${backups[$((choice - 1))]}"
@@ -1240,18 +1363,19 @@ instance_menu() {
   while true; do
     clear_screen
     panel_header
-    echo "  1) 安装 / 重装 Snell ${SNELL_PROTOCOL}"
-    echo "  2) 查看运行概览"
-    echo "  3) 配置管理"
-    echo "  4) 生成客户端配置"
-    echo "  5) 服务控制"
-    echo "  6) 更新服务端版本"
-    echo "  7) 查看最近日志"
-    echo "  8) 实时跟踪日志"
-    echo "  9) 一键诊断"
-    echo " 10) 备份与恢复"
-    echo " 11) 卸载 Snell"
-    echo "  0) 返回版本选择"
+    section_title "实例操作"
+    menu_option 1 "安装 / 重装 Snell ${SNELL_PROTOCOL}"
+    menu_option 2 "查看运行概览"
+    menu_option 3 "配置管理"
+    menu_option 4 "生成客户端配置"
+    menu_option 5 "服务控制"
+    menu_option 6 "更新服务端版本" accent
+    menu_option 7 "查看最近日志"
+    menu_option 8 "实时跟踪日志"
+    menu_option 9 "一键诊断"
+    menu_option 10 "备份与恢复"
+    menu_option 11 "卸载 Snell" danger
+    menu_option 0 "返回版本选择" back
     echo
     read -r -p "请选择: " choice
     case "$choice" in
@@ -1287,7 +1411,7 @@ instance_menu() {
 }
 
 instance_summary_row() {
-  local protocol="$1" state="未安装" version="-" port="-" transport="-"
+  local protocol="$1" state="未安装" version="-" port="-" transport="-" status_style
   use_instance "$protocol"
   if is_installed; then
     service_is_active && state="运行中" || state="已停止"
@@ -1297,25 +1421,30 @@ instance_summary_row() {
   elif has_installation_files; then
     state="安装不完整"
   fi
-  printf '  %-4s %-10s %-12s %-9s %s\n' "$protocol" "$state" "$version" "$transport" "$port"
+  status_style="$(state_color "$state")"
+  printf '  %b%-4s%b %b%-10s%b %b%-12s%b %-9s %b%s%b\n' \
+    "${C_CYAN}${C_BOLD}" "$protocol" "$C_RESET" \
+    "$status_style" "$state" "$C_RESET" \
+    "$C_MAGENTA" "$version" "$C_RESET" "$transport" \
+    "$C_YELLOW" "$port" "$C_RESET"
 }
 
 show_all_status() {
   local selected="$SNELL_PROTOCOL"
-  printf '%b\n' "${C_BOLD}Snell 双实例概览${C_RESET}"
-  printf '  %-4s %-10s %-12s %-9s %s\n' "实例" "状态" "版本" "传输" "端口"
+  printf '%b\n' "${C_BOLD}${C_WHITE}Snell 双实例概览${C_RESET}"
+  printf '%b  %-4s %-10s %-12s %-9s %s%b\n' "$C_GRAY" "实例" "状态" "版本" "传输" "端口" "$C_RESET"
   instance_summary_row v5
   instance_summary_row v6
   use_instance "$selected"
 }
 
 multi_panel_header() {
-  printf '%b\n' "${C_BOLD}┌──────────────────────────────────────┐${C_RESET}"
-  printf '%b\n' "${C_BOLD}│       Snell v5 / v6 管理面板         │${C_RESET}"
-  printf '%b\n' "${C_BOLD}└──────────────────────────────────────┘${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}╭────────────────────────────────────────────╮${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}│${C_RESET}          ${C_WHITE}${C_BOLD}Snell v5 / v6 管理控制台${C_RESET}          ${C_CYAN}${C_BOLD}│${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}╰────────────────────────────────────────────╯${C_RESET}"
   show_all_status
   if legacy_has_files; then
-    printf '  旧实例: 检测到 snell.service (%s)，可从菜单迁移\n' "$(legacy_installed_version | sed 's/^$/版本未知/')"
+    printf '  %b旧实例%b  检测到 snell.service (%s)，可从菜单迁移\n' "$C_YELLOW" "$C_RESET" "$(legacy_installed_version | sed 's/^$/版本未知/')"
   fi
   echo
 }
@@ -1325,15 +1454,47 @@ instance_selector_menu() {
   while true; do
     clear_screen
     multi_panel_header
-    echo "选择要管理的实例"
-    echo "  1) Snell v5"
-    echo "  2) Snell v6"
-    echo "  0) 返回主菜单"
+    section_title "选择要管理的实例"
+    menu_option 1 "Snell v5"
+    menu_option 2 "Snell v6"
+    menu_option 0 "返回主菜单" back
     echo
     read -r -p "请选择: " choice
     case "$choice" in
       1) use_instance v5; instance_menu ;;
       2) use_instance v6; instance_menu ;;
+      0) return 0 ;;
+      *) yellow "无效选择。"; pause_screen ;;
+    esac
+  done
+}
+
+manager_settings_menu() {
+  local choice answer command_state="未注册" command_style
+  while true; do
+    clear_screen
+    multi_panel_header
+    if is_snell_manager_script "$SNELL_COMMAND_PATH"; then
+      command_state="已注册"
+    else
+      command_state="未注册"
+    fi
+    command_style="$(state_color "$command_state")"
+    section_title "面板设置 / 升级"
+    printf '  %b短命令%b  %b%s%b\n' "$C_GRAY" "$C_RESET" "$command_style" "$SNELL_COMMAND_PATH" "$C_RESET"
+    printf '  %b状态%b    %b%s%b\n\n' "$C_GRAY" "$C_RESET" "$command_style" "$command_state" "$C_RESET"
+    menu_option 1 "注册 / 修复 snell 短命令"
+    menu_option 2 "检查并升级管理面板" accent
+    menu_option 0 "返回主菜单" back
+    echo
+    read -r -p "请选择: " choice
+    case "$choice" in
+      1) register_short_command || true; pause_screen ;;
+      2)
+        read -r -p "确认从官方仓库检查并升级管理面板? [y/N] " answer
+        if [[ "$answer" =~ ^[yY]$ ]]; then update_manager || true; else yellow "已取消。"; fi
+        pause_screen
+        ;;
       0) return 0 ;;
       *) yellow "无效选择。"; pause_screen ;;
     esac
@@ -1352,10 +1513,12 @@ menu() {
   while true; do
     clear_screen
     multi_panel_header
-    echo "  1) 管理 Snell"
-    echo "  2) 查看双实例详细状态"
-    echo "  3) 迁移旧版单实例"
-    echo "  0) 退出"
+    section_title "主菜单"
+    menu_option 1 "管理 Snell"
+    menu_option 2 "查看双实例详细状态"
+    menu_option 3 "迁移旧版单实例"
+    menu_option 4 "面板设置 / 升级" accent
+    menu_option 0 "退出" back
     echo
     read -r -p "请选择: " choice
     case "$choice" in
@@ -1381,6 +1544,7 @@ menu() {
         if [[ "$answer" =~ ^[yY]$ ]]; then migrate_legacy "$detected" || true; else yellow "已取消。"; fi
         pause_screen
         ;;
+      4) manager_settings_menu ;;
       0) echo "已退出。"; return 0 ;;
       *) yellow "无效选择。"; pause_screen ;;
     esac
@@ -1399,6 +1563,7 @@ Snell v5 / v6 多实例安装与配置管理
   manage                     打开所选版本的实例面板
   status-all                 查看 v5 与 v6 概览
   register-command           注册 / 更新 snell 短命令
+  self-update                检查并升级管理面板
   migrate [v5|v6]            将旧 snell.service 迁移为独立实例
   install                    安装或重装所选实例
   uninstall                  卸载并清理所选实例
@@ -1430,6 +1595,7 @@ Snell v5 / v6 多实例安装与配置管理
   snell v5 install
   snell v6 install
   snell status-all
+  snell self-update
   snell migrate
   snell v5 client snell.example.com
 EOF
@@ -1461,6 +1627,7 @@ case "${1:-menu}" in
   update)       update_server "${2:-$SNELL_VERSION}" ;;
   status-all)   show_all_status ;;
   register-command) register_short_command ;;
+  self-update)  update_manager ;;
   migrate)      migrate_legacy "${2:-}" ;;
   manage)       instance_menu ;;
   menu)         menu ;;

@@ -12,6 +12,8 @@ curl -fsSL https://raw.githubusercontent.com/mikuuu3981/snell-click/main/snell.s
 
 主面板会同时显示 v5 和 v6 的状态。进入统一的“管理 Snell”入口后选择 v5 或 v6，脚本会为两个实例选择不同的可用端口。
 
+交互面板会在终端中使用颜色区分运行状态、普通操作、升级和危险操作；设置 `NO_COLOR=1` 可以关闭颜色输出。
+
 v5 默认采用官方向导一致的 IPv4 监听，v6 默认启用 IPv4/IPv6 双栈。两个实例都可以在配置菜单中单独调整 IPv6。
 
 防火墙要求：
@@ -46,6 +48,7 @@ v5 默认采用官方向导一致的 IPv4 监听，v6 默认启用 IPv4/IPv6 双
 - 手动备份、自动变更前备份和一键恢复
 - 配置启动失败时自动回滚
 - 服务端更新失败时自动恢复旧二进制
+- 面板设置中注册短命令并检查、升级管理脚本
 
 状态页只显示脱敏 PSK。完整 PSK 仅在客户端配置页和主动修改 PSK 后显示。
 
@@ -75,6 +78,16 @@ sudo snell v6 update v6.0.0b4
 ```
 
 其他配置命令 `set-ipv6`、`set-dns`、`set-dns-preference`、`set-egress`、`logs`、`backup` 和 `restore` 同样接受版本前缀。运行 `snell help` 查看完整列表。
+
+## 管理面板升级
+
+从主菜单进入“面板设置 / 升级”，选择“检查并升级管理面板”；也可以直接运行：
+
+```bash
+sudo snell self-update
+```
+
+升级过程会先下载到临时文件，验证脚本身份和 Bash 语法后再原子替换 `/usr/local/bin/snell`。升级完成后退出当前面板并重新运行 `snell` 即可使用新版。该操作不会修改 Snell v5/v6 的服务端程序、配置、端口、PSK、服务或备份。同一版本重复检查只会提示当前已是最新版本。
 
 ## 旧版迁移
 

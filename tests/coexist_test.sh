@@ -63,12 +63,36 @@ if SNELL_COMMAND_PATH="$occupied_command" run_snell register-command >/dev/null 
 fi
 [ "$("$occupied_command")" = "occupied" ]
 
+blocked_parent="${TEMP_DIR}/blocked-command-parent"
+printf 'not a directory\n' > "$blocked_parent"
+if SNELL_COMMAND_PATH="${blocked_parent}/snell" run_snell register-command >/dev/null 2>&1; then
+  echo "断言失败: 短命令写入失败时不应报告注册成功" >&2
+  exit 1
+fi
+
 run_snell register-command >/dev/null
 [ -x "${BIN_DIR}/snell" ]
 output="$("${BIN_DIR}/snell" status-all)"
 assert_contains "$output" "v5.0.1"
 assert_contains "$output" "v6.0.0b4"
 run_snell register-command >/dev/null
+
+manager_update="${TEMP_DIR}/manager-update.sh"
+cp "${ROOT_DIR}/snell.sh" "$manager_update"
+printf '\n# manager update test fixture\n' >> "$manager_update"
+output="$(SNELL_MANAGER_URL="$manager_update" run_snell self-update)"
+assert_contains "$output" "管理面板已升级"
+cmp -s "$manager_update" "${BIN_DIR}/snell"
+output="$(SNELL_MANAGER_URL="$manager_update" run_snell self-update)"
+assert_contains "$output" "已是最新版本"
+
+invalid_update="${TEMP_DIR}/invalid-manager.sh"
+printf '#!/usr/bin/env bash\necho invalid\n' > "$invalid_update"
+if SNELL_MANAGER_URL="$invalid_update" run_snell self-update >/dev/null 2>&1; then
+  echo "断言失败: 管理面板升级应拒绝无效脚本" >&2
+  exit 1
+fi
+cmp -s "$manager_update" "${BIN_DIR}/snell"
 
 output="$(run_snell status-all)"
 assert_contains "$output" "v5"
