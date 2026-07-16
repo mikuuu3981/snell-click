@@ -1251,18 +1251,13 @@ configuration_menu() {
     panel_header
     section_title "配置管理"
     menu_option 1 "修改监听端口"
-    menu_option 2 "重新生成 PSK"
-    menu_option 3 "设置自定义 PSK"
-    if [ "$SNELL_PROTOCOL" = "v6" ]; then
-      menu_option 4 "切换运行模式"
-    else
-      menu_option 4 "运行模式（仅 v6）" back
-    fi
-    menu_option 5 "开启 / 关闭 IPv6"
-    menu_option 6 "设置自定义 DNS"
-    menu_option 7 "设置 DNS IP 偏好"
-    menu_option 8 "绑定出口网卡"
-    menu_option 0 "返回" back
+    menu_option 2 "修改 PSK（留空自动生成）"
+    menu_option 3 "开启 / 关闭 IPv6"
+    menu_option 4 "设置自定义 DNS"
+    menu_option 5 "设置 DNS IP 偏好"
+    menu_option 6 "绑定出口网卡"
+    [ "$SNELL_PROTOCOL" = "v6" ] && menu_option 7 "切换运行模式"
+    menu_option q "返回" back
     echo
     read -r -p "请选择: " choice
     case "$choice" in
@@ -1273,52 +1268,36 @@ configuration_menu() {
         pause_screen
         ;;
       2)
-        read -r -p "这会使旧客户端配置失效，确认重新生成? [y/N] " value
-        if [[ "$value" =~ ^[yY]$ ]]; then set_psk || true; else yellow "已取消。"; fi
-        pause_screen
-        ;;
-      3)
-        read -r -s -p "输入新 PSK (12-255 字符): " value; echo
-        if [ -n "$value" ]; then set_psk "$value" || true; else yellow "未修改。"; fi
-        pause_screen
-        ;;
-      4)
-        if [ "$SNELL_PROTOCOL" = "v5" ]; then
-          yellow "Snell v5 没有可管理的 mode 参数。"
+        read -r -s -p "新 PSK [留空自动生成，输入 q 取消]: " value; echo
+        if [[ "$value" =~ ^[qQ]$ ]] || [ "$value" = "0" ]; then
+          continue
         else
-          menu_option 1 "default    兼容性优先"
-          menu_option 2 "unshaped   不使用流量整形"
-          menu_option 3 "unsafe-raw 原始模式"
-          read -r -p "请选择 [当前 $(current_mode)]: " value
-          case "$value" in
-            1) set_mode default || true ;;
-            2) set_mode unshaped || true ;;
-            3) set_mode unsafe-raw || true ;;
-            *) yellow "未修改。" ;;
-          esac
+          read -r -p "修改后旧客户端配置将失效，确认继续? [y/N] " choice
+          if [[ "$choice" =~ ^[yY]$ ]]; then set_psk "$value" || true; else yellow "已取消。"; fi
         fi
         pause_screen
         ;;
-      5)
+      3)
         current="$(current_ipv6)"
         [ "$current" = "true" ] && value="false" || value="true"
         read -r -p "将 IPv6 从 ${current} 切换为 ${value}? [y/N] " choice
         if [[ "$choice" =~ ^[yY]$ ]]; then set_ipv6 "$value" || true; else yellow "已取消。"; fi
         pause_screen
         ;;
-      6)
+      4)
         echo "当前值: $(current_dns | sed 's/^$/系统默认/')"
         read -r -p "DNS 地址，多个用逗号分隔（留空清除）: " value
         set_dns "$value" || true
         pause_screen
         ;;
-      7)
+      5)
         menu_option 1 "default"
         menu_option 2 "prefer-ipv4"
         menu_option 3 "prefer-ipv6"
         menu_option 4 "ipv4-only"
         menu_option 5 "ipv6-only"
         menu_option 6 "清除显式设置" back
+        menu_option q "返回" back
         read -r -p "请选择 [当前 $(current_dns_preference | sed 's/^$/default/')]: " value
         case "$value" in
           1) set_dns_preference default || true ;;
@@ -1327,43 +1306,137 @@ configuration_menu() {
           4) set_dns_preference ipv4-only || true ;;
           5) set_dns_preference ipv6-only || true ;;
           6) set_dns_preference "" || true ;;
+          0|q|Q) continue ;;
           *) yellow "未修改。" ;;
         esac
         pause_screen
         ;;
-      8)
+      6)
         echo "当前值: $(current_egress_interface | sed 's/^$/未绑定/')"
         read -r -p "出口网卡名称（留空清除）: " value
         set_egress_interface "$value" || true
         pause_screen
         ;;
-      0) return 0 ;;
+      7)
+        if [ "$SNELL_PROTOCOL" != "v6" ]; then
+          yellow "无效选择。"
+        else
+          menu_option 1 "default    兼容性优先"
+          menu_option 2 "unshaped   不使用流量整形"
+          menu_option 3 "unsafe-raw 原始模式"
+          menu_option q "返回" back
+          read -r -p "请选择 [当前 $(current_mode)]: " value
+          case "$value" in
+            1) set_mode default || true ;;
+            2) set_mode unshaped || true ;;
+            3) set_mode unsafe-raw || true ;;
+            0|q|Q) continue ;;
+            *) yellow "未修改。" ;;
+          esac
+        fi
+        pause_screen
+        ;;
+      0|q|Q) return 0 ;;
       *) yellow "无效选择。"; pause_screen ;;
     esac
   done
 }
 
 service_menu() {
-  local choice
+  local choice primary_action primary_label autostart_action autostart_label
   while true; do
     clear_screen
     panel_header
     section_title "服务控制"
-    menu_option 1 "启动"
-    menu_option 2 "停止"
-    menu_option 3 "重启"
-    menu_option 4 "开启开机自启"
-    menu_option 5 "关闭开机自启"
-    menu_option 0 "返回" back
+    if service_is_active; then
+      primary_action="restart"
+      primary_label="重启服务"
+    else
+      primary_action="start"
+      primary_label="启动服务"
+    fi
+    if service_is_enabled; then
+      autostart_action="disable"
+      autostart_label="关闭开机自启"
+    else
+      autostart_action="enable"
+      autostart_label="开启开机自启"
+    fi
+    menu_option 1 "$primary_label"
+    menu_option 2 "$autostart_label"
+    service_is_active && menu_option 3 "停止服务"
+    menu_option q "返回" back
     echo
     read -r -p "请选择: " choice
     case "$choice" in
-      1) service_action start || true; pause_screen ;;
-      2) service_action stop || true; pause_screen ;;
-      3) service_action restart || true; pause_screen ;;
-      4) service_action enable || true; pause_screen ;;
-      5) service_action disable || true; pause_screen ;;
-      0) return 0 ;;
+      1) service_action "$primary_action" || true; pause_screen ;;
+      2) service_action "$autostart_action" || true; pause_screen ;;
+      3)
+        if service_is_active; then service_action stop || true; else yellow "无效选择。"; fi
+        pause_screen
+        ;;
+      0|q|Q) return 0 ;;
+      *) yellow "无效选择。"; pause_screen ;;
+    esac
+  done
+}
+
+maintenance_menu() {
+  local choice answer version
+  while true; do
+    has_installation_files || return 0
+    clear_screen
+    panel_header
+    section_title "日志与维护"
+    if is_installed; then
+      menu_option 1 "查看运行详情"
+      menu_option 2 "查看最近日志"
+      menu_option 3 "实时跟踪日志"
+      menu_option 4 "一键诊断"
+      menu_option 5 "备份与恢复"
+      menu_option 6 "更新服务端版本" accent
+      menu_option 7 "卸载 Snell" danger
+    else
+      menu_option 1 "查看安装详情"
+      menu_option 2 "一键诊断"
+      menu_option 3 "清理残留文件" danger
+    fi
+    menu_option q "返回" back
+    echo
+    read -r -p "请选择: " choice
+    if ! is_installed; then
+      case "$choice" in
+        1) clear_screen; show_status || true; pause_screen ;;
+        2) clear_screen; diagnose || true; pause_screen ;;
+        3)
+          read -r -p "确认清理当前残留的程序、配置和备份? [y/N] " answer
+          if [[ "$answer" =~ ^[yY]$ ]]; then do_uninstall; else yellow "已取消。"; fi
+          pause_screen
+          ;;
+        0|q|Q) return 0 ;;
+        *) yellow "无效选择。"; pause_screen ;;
+      esac
+      continue
+    fi
+    case "$choice" in
+      1) clear_screen; show_status || true; pause_screen ;;
+      2) clear_screen; show_logs 100 || true; pause_screen ;;
+      3) clear_screen; follow_logs || true; pause_screen ;;
+      4) clear_screen; diagnose || true; pause_screen ;;
+      5) backup_menu ;;
+      6)
+        read -r -p "目标版本 [${SNELL_VERSION}]: " version
+        version="${version:-$SNELL_VERSION}"
+        read -r -p "确认更新到 ${version}? [y/N] " answer
+        if [[ "$answer" =~ ^[yY]$ ]]; then update_server "$version" || true; else yellow "已取消。"; fi
+        pause_screen
+        ;;
+      7)
+        read -r -p "这会删除程序、配置和备份，确认卸载? [y/N] " answer
+        if [[ "$answer" =~ ^[yY]$ ]]; then do_uninstall; else yellow "已取消。"; fi
+        pause_screen
+        ;;
+      0|q|Q) return 0 ;;
       *) yellow "无效选择。"; pause_screen ;;
     esac
   done
@@ -1378,7 +1451,7 @@ backup_menu() {
     section_title "备份与恢复"
     menu_option 1 "创建配置备份"
     menu_option 2 "恢复配置备份"
-    menu_option 0 "返回" back
+    menu_option q "返回" back
     echo
     read -r -p "请选择: " choice
     case "$choice" in
@@ -1396,9 +1469,11 @@ backup_menu() {
         fi
         echo
         for choice in "${!backups[@]}"; do menu_option "$((choice + 1))" "$(basename "${backups[$choice]}")"; done
-        menu_option 0 "取消" back
+        menu_option q "取消" back
         read -r -p "选择备份: " choice
-        if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && [ "$choice" -le "${#backups[@]}" ]; then
+        if [[ "$choice" =~ ^[qQ]$ ]] || [ "$choice" = "0" ]; then
+          continue
+        elif [[ "$choice" =~ ^[1-9][0-9]*$ ]] && [ "$choice" -le "${#backups[@]}" ]; then
           backup="${backups[$((choice - 1))]}"
           read -r -p "确认恢复 $(basename "$backup")? [y/N] " answer
           if [[ "$answer" =~ ^[yY]$ ]]; then restore_backup "$backup" || true; else yellow "已取消。"; fi
@@ -1407,61 +1482,53 @@ backup_menu() {
         fi
         pause_screen
         ;;
-      0) return 0 ;;
+      0|q|Q) return 0 ;;
       *) yellow "无效选择。"; pause_screen ;;
     esac
   done
 }
 
 instance_menu() {
-  local choice answer version
+  local choice
   need_root
   [ -t 0 ] || { red "交互式面板需要在终端中运行。"; return 1; }
   while true; do
     clear_screen
     panel_header
-    section_title "实例操作"
-    menu_option 1 "安装 / 重装 Snell ${SNELL_PROTOCOL}（可指定端口）"
-    menu_option 2 "查看运行概览"
-    menu_option 3 "配置管理（端口 / PSK / 网络）"
-    menu_option 4 "生成客户端配置"
-    menu_option 5 "服务控制"
-    menu_option 6 "更新服务端版本" accent
-    menu_option 7 "查看最近日志"
-    menu_option 8 "实时跟踪日志"
-    menu_option 9 "一键诊断"
-    menu_option 10 "备份与恢复"
-    menu_option 11 "卸载 Snell" danger
-    menu_option 0 "返回版本选择" back
+    section_title "常用操作"
+    if is_installed; then
+      menu_option 1 "重装 Snell ${SNELL_PROTOCOL}（可修改端口）"
+      menu_option 2 "生成客户端配置"
+      menu_option 3 "修改配置"
+      menu_option 4 "服务控制"
+      menu_option 5 "日志与维护"
+    elif has_installation_files; then
+      menu_option 1 "修复 Snell ${SNELL_PROTOCOL} 安装"
+      menu_option 2 "诊断 / 清理残留"
+    else
+      menu_option 1 "安装 Snell ${SNELL_PROTOCOL}"
+    fi
+    menu_option q "返回主菜单" back
     echo
     read -r -p "请选择: " choice
     case "$choice" in
       1) do_install || true; pause_screen ;;
-      2) clear_screen; show_status || true; pause_screen ;;
-      3) if is_installed; then configuration_menu; else yellow "请先完成安装。"; pause_screen; fi ;;
-      4) clear_screen; show_client_config || true; pause_screen ;;
-      5) if is_installed; then service_menu; else yellow "请先完成安装。"; pause_screen; fi ;;
-      6)
+      2)
         if is_installed; then
-          read -r -p "目标版本 [${SNELL_VERSION}]: " version
-          version="${version:-$SNELL_VERSION}"
-          read -r -p "确认更新到 ${version}? [y/N] " answer
-          if [[ "$answer" =~ ^[yY]$ ]]; then update_server "$version" || true; else yellow "已取消。"; fi
+          clear_screen
+          show_client_config || true
+          pause_screen
+        elif has_installation_files; then
+          maintenance_menu
         else
-          yellow "请先完成安装。"
+          yellow "无效选择。"
+          pause_screen
         fi
-        pause_screen
         ;;
-      7) clear_screen; show_logs 100 || true; pause_screen ;;
-      8) clear_screen; follow_logs || true; pause_screen ;;
-      9) clear_screen; diagnose || true; pause_screen ;;
-      10) if is_installed; then backup_menu; else yellow "请先完成安装。"; pause_screen; fi ;;
-      11)
-        read -r -p "这会删除程序、配置和备份，确认卸载? [y/N] " answer
-        if [[ "$answer" =~ ^[yY]$ ]]; then do_uninstall; else yellow "已取消。"; fi
-        pause_screen
-        ;;
-      0) return 0 ;;
+      3) if is_installed; then configuration_menu; else yellow "无效选择。"; pause_screen; fi ;;
+      4) if is_installed; then service_menu; else yellow "无效选择。"; pause_screen; fi ;;
+      5) if is_installed; then maintenance_menu; else yellow "无效选择。"; pause_screen; fi ;;
+      0|q|Q) return 0 ;;
       *) yellow "无效选择。"; pause_screen ;;
     esac
   done
@@ -1506,26 +1573,6 @@ multi_panel_header() {
   echo
 }
 
-instance_selector_menu() {
-  local choice
-  while true; do
-    clear_screen
-    multi_panel_header
-    section_title "选择要管理的实例"
-    menu_option 1 "Snell v5"
-    menu_option 2 "Snell v6"
-    menu_option 0 "返回主菜单" back
-    echo
-    read -r -p "请选择: " choice
-    case "$choice" in
-      1) use_instance v5; instance_menu ;;
-      2) use_instance v6; instance_menu ;;
-      0) return 0 ;;
-      *) yellow "无效选择。"; pause_screen ;;
-    esac
-  done
-}
-
 manager_settings_menu() {
   local choice answer command_state="未注册" command_style
   while true; do
@@ -1542,7 +1589,7 @@ manager_settings_menu() {
     printf '  %b状态%b    %b%s%b\n\n' "$C_GRAY" "$C_RESET" "$command_style" "$command_state" "$C_RESET"
     menu_option 1 "注册 / 修复 snell 短命令"
     menu_option 2 "检查并升级管理面板" accent
-    menu_option 0 "返回主菜单" back
+    menu_option q "返回主菜单" back
     echo
     read -r -p "请选择: " choice
     case "$choice" in
@@ -1552,7 +1599,7 @@ manager_settings_menu() {
         if [[ "$answer" =~ ^[yY]$ ]]; then update_manager || true; else yellow "已取消。"; fi
         pause_screen
         ;;
-      0) return 0 ;;
+      0|q|Q) return 0 ;;
       *) yellow "无效选择。"; pause_screen ;;
     esac
   done
@@ -1571,25 +1618,20 @@ menu() {
     clear_screen
     multi_panel_header
     section_title "主菜单"
-    menu_option 1 "管理 Snell"
-    menu_option 2 "查看双实例详细状态"
-    menu_option 3 "迁移旧版单实例"
-    menu_option 4 "面板设置 / 升级" accent
-    menu_option 0 "退出" back
+    menu_option 1 "管理 Snell v5"
+    menu_option 2 "管理 Snell v6"
+    menu_option 3 "面板设置 / 升级" accent
+    legacy_has_files && menu_option 4 "迁移旧版单实例"
+    menu_option q "退出" back
     echo
     read -r -p "请选择: " choice
     case "$choice" in
-      1) instance_selector_menu ;;
-      2)
-        clear_screen
-        use_instance v5; show_status || true
-        echo
-        use_instance v6; show_status || true
-        pause_screen
-        ;;
-      3)
+      1) use_instance v5; instance_menu ;;
+      2) use_instance v6; instance_menu ;;
+      3) manager_settings_menu ;;
+      4)
         if ! legacy_has_files; then
-          yellow "没有检测到旧版单实例。"
+          yellow "无效选择。"
           pause_screen
           continue
         fi
@@ -1601,8 +1643,7 @@ menu() {
         if [[ "$answer" =~ ^[yY]$ ]]; then migrate_legacy "$detected" || true; else yellow "已取消。"; fi
         pause_screen
         ;;
-      4) manager_settings_menu ;;
-      0) echo "已退出。"; return 0 ;;
+      0|q|Q) echo "已退出。"; return 0 ;;
       *) yellow "无效选择。"; pause_screen ;;
     esac
   done

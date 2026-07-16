@@ -10,11 +10,11 @@ curl -fsSL https://raw.githubusercontent.com/mikuuu3981/snell-click/main/snell.s
 
 首次打开主面板会自动注册 `/usr/local/bin/snell` 短命令，以后直接运行 `sudo snell` 即可。也可以在脚本目录运行 `sudo ./snell.sh register-command` 手动注册或更新短命令。
 
-主面板会同时显示 v5 和 v6 的状态。进入统一的“管理 Snell”入口后选择 v5 或 v6，脚本会为两个实例选择不同的可用端口。
+主面板会同时显示 v5 和 v6 的状态，并可直接进入对应实例。每个实例的常用操作按安装、客户端、配置、服务、日志与维护分组，脚本会为两个实例选择不同的可用端口。
 
 安装时可以直接输入监听端口；留空则自动选择 `20000-40000` 之间的可用端口。重装时留空会保留当前端口，也可以输入新端口。脚本会在写入配置前验证端口范围并检查 TCP/UDP 占用。
 
-交互面板会在终端中使用颜色区分运行状态、普通操作、升级和危险操作；设置 `NO_COLOR=1` 可以关闭颜色输出。
+交互面板会在终端中使用颜色区分运行状态、普通操作、升级和危险操作；所有菜单都可以按 `q` 返回上一级，主菜单按 `q` 退出。设置 `NO_COLOR=1` 可以关闭颜色输出。
 
 v5 默认采用官方向导一致的 IPv4 监听，v6 默认启用 IPv4/IPv6 双栈。两个实例都可以在配置菜单中单独调整 IPv6。
 
@@ -138,5 +138,6 @@ sudo -E snell install
 ```bash
 ./tests/snell_test.sh
 ./tests/coexist_test.sh
+./tests/menu_test.sh
 shellcheck snell.sh tests/*.sh tests/fixtures/*
 ```
