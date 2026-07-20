@@ -1244,19 +1244,101 @@ panel_header() {
     "$C_GRAY" "$C_RESET" "$C_YELLOW" "$port" "$C_RESET"
 }
 
-configuration_menu() {
-  local choice value current
+advanced_configuration_menu() {
+  local choice value current dns_state dns_preference_label egress_interface
   while true; do
+    current="$(current_dns_preference)"
+    case "$current" in
+      ''|default) dns_preference_label="自动选择" ;;
+      prefer-ipv4) dns_preference_label="优先 IPv4" ;;
+      prefer-ipv6) dns_preference_label="优先 IPv6" ;;
+      ipv4-only) dns_preference_label="仅 IPv4" ;;
+      ipv6-only) dns_preference_label="仅 IPv6" ;;
+      *) dns_preference_label="$current" ;;
+    esac
+    [ -n "$(current_dns)" ] && dns_state="已设置" || dns_state="系统默认"
+    egress_interface="$(current_egress_interface)"
+    egress_interface="${egress_interface:-未绑定}"
+
     clear_screen
     panel_header
-    section_title "配置管理"
-    menu_option 1 "修改监听端口"
-    menu_option 2 "修改 PSK（留空自动生成）"
-    menu_option 3 "开启 / 关闭 IPv6"
-    menu_option 4 "设置自定义 DNS"
-    menu_option 5 "设置 DNS IP 偏好"
-    menu_option 6 "绑定出口网卡"
-    [ "$SNELL_PROTOCOL" = "v6" ] && menu_option 7 "切换运行模式"
+    section_title "高级配置"
+    menu_option 1 "自定义 DNS  ·  ${dns_state}"
+    menu_option 2 "DNS IP 偏好  ·  ${dns_preference_label}"
+    menu_option 3 "出口网卡  ·  ${egress_interface}"
+    [ "$SNELL_PROTOCOL" = "v6" ] && menu_option 4 "运行模式  ·  $(current_mode)"
+    menu_option q "返回配置" back
+    echo
+    read -r -p "请选择: " choice
+    case "$choice" in
+      1)
+        echo "当前值: $(current_dns | sed 's/^$/系统默认/')"
+        read -r -p "DNS 地址，多个用逗号分隔（留空清除）: " value
+        set_dns "$value" || true
+        pause_screen
+        ;;
+      2)
+        menu_option 1 "自动选择（默认）"
+        menu_option 2 "优先 IPv4"
+        menu_option 3 "优先 IPv6"
+        menu_option 4 "仅 IPv4"
+        menu_option 5 "仅 IPv6"
+        menu_option q "返回" back
+        read -r -p "请选择 [当前 ${dns_preference_label}]: " value
+        case "$value" in
+          1) set_dns_preference "" || true ;;
+          2) set_dns_preference prefer-ipv4 || true ;;
+          3) set_dns_preference prefer-ipv6 || true ;;
+          4) set_dns_preference ipv4-only || true ;;
+          5) set_dns_preference ipv6-only || true ;;
+          0|q|Q) continue ;;
+          *) yellow "未修改。" ;;
+        esac
+        pause_screen
+        ;;
+      3)
+        echo "当前值: $(current_egress_interface | sed 's/^$/未绑定/')"
+        read -r -p "出口网卡名称（留空清除）: " value
+        set_egress_interface "$value" || true
+        pause_screen
+        ;;
+      4)
+        if [ "$SNELL_PROTOCOL" != "v6" ]; then
+          yellow "无效选择。"
+        else
+          menu_option 1 "default    兼容性优先"
+          menu_option 2 "unshaped   不使用流量整形"
+          menu_option 3 "unsafe-raw 原始模式"
+          menu_option q "返回" back
+          read -r -p "请选择 [当前 $(current_mode)]: " value
+          case "$value" in
+            1) set_mode default || true ;;
+            2) set_mode unshaped || true ;;
+            3) set_mode unsafe-raw || true ;;
+            0|q|Q) continue ;;
+            *) yellow "未修改。" ;;
+          esac
+        fi
+        pause_screen
+        ;;
+      0|q|Q) return 0 ;;
+      *) yellow "无效选择。"; pause_screen ;;
+    esac
+  done
+}
+
+configuration_menu() {
+  local choice value current ipv6_state
+  while true; do
+    current="$(current_ipv6)"
+    [ "$current" = "true" ] && ipv6_state="已开启" || ipv6_state="已关闭"
+    clear_screen
+    panel_header
+    section_title "修改配置"
+    menu_option 1 "监听端口  ·  $(current_port)"
+    menu_option 2 "更新 PSK"
+    menu_option 3 "IPv6  ·  ${ipv6_state}"
+    menu_option 4 "高级配置"
     menu_option q "返回" back
     echo
     read -r -p "请选择: " choice
@@ -1280,62 +1362,12 @@ configuration_menu() {
       3)
         current="$(current_ipv6)"
         [ "$current" = "true" ] && value="false" || value="true"
-        read -r -p "将 IPv6 从 ${current} 切换为 ${value}? [y/N] " choice
+        [ "$value" = "true" ] && current="开启" || current="关闭"
+        read -r -p "确认${current} IPv6? [y/N] " choice
         if [[ "$choice" =~ ^[yY]$ ]]; then set_ipv6 "$value" || true; else yellow "已取消。"; fi
         pause_screen
         ;;
-      4)
-        echo "当前值: $(current_dns | sed 's/^$/系统默认/')"
-        read -r -p "DNS 地址，多个用逗号分隔（留空清除）: " value
-        set_dns "$value" || true
-        pause_screen
-        ;;
-      5)
-        menu_option 1 "default"
-        menu_option 2 "prefer-ipv4"
-        menu_option 3 "prefer-ipv6"
-        menu_option 4 "ipv4-only"
-        menu_option 5 "ipv6-only"
-        menu_option 6 "清除显式设置" back
-        menu_option q "返回" back
-        read -r -p "请选择 [当前 $(current_dns_preference | sed 's/^$/default/')]: " value
-        case "$value" in
-          1) set_dns_preference default || true ;;
-          2) set_dns_preference prefer-ipv4 || true ;;
-          3) set_dns_preference prefer-ipv6 || true ;;
-          4) set_dns_preference ipv4-only || true ;;
-          5) set_dns_preference ipv6-only || true ;;
-          6) set_dns_preference "" || true ;;
-          0|q|Q) continue ;;
-          *) yellow "未修改。" ;;
-        esac
-        pause_screen
-        ;;
-      6)
-        echo "当前值: $(current_egress_interface | sed 's/^$/未绑定/')"
-        read -r -p "出口网卡名称（留空清除）: " value
-        set_egress_interface "$value" || true
-        pause_screen
-        ;;
-      7)
-        if [ "$SNELL_PROTOCOL" != "v6" ]; then
-          yellow "无效选择。"
-        else
-          menu_option 1 "default    兼容性优先"
-          menu_option 2 "unshaped   不使用流量整形"
-          menu_option 3 "unsafe-raw 原始模式"
-          menu_option q "返回" back
-          read -r -p "请选择 [当前 $(current_mode)]: " value
-          case "$value" in
-            1) set_mode default || true ;;
-            2) set_mode unshaped || true ;;
-            3) set_mode unsafe-raw || true ;;
-            0|q|Q) continue ;;
-            *) yellow "未修改。" ;;
-          esac
-        fi
-        pause_screen
-        ;;
+      4) advanced_configuration_menu ;;
       0|q|Q) return 0 ;;
       *) yellow "无效选择。"; pause_screen ;;
     esac

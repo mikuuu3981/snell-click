@@ -82,16 +82,31 @@ assert_contains "$output" "一键诊断"
 assert_contains "$output" "清理残留文件"
 
 setup_instance v5 v5.0.1 23505
-output="$(run_menu 1 3 2 q q q q)"
-assert_contains "$output" "修改 PSK（留空自动生成）"
-assert_not_contains "$output" "切换运行模式"
+output="$(run_menu 1 3 q q q)"
+assert_contains "$output" "修改配置"
+assert_contains "$output" "监听端口  ·  23505"
+assert_contains "$output" "IPv6  ·  已关闭"
+assert_contains "$output" "高级配置"
+assert_not_contains "$output" "自定义 DNS"
+
+output="$(run_menu 1 3 4 q q q q)"
+assert_contains "$output" "自定义 DNS  ·  系统默认"
+assert_not_contains "$output" "运行模式  ·"
 
 setup_instance v6 v6.0.0b4 23606
-output="$(run_menu 2 4 q 3 5 q 7 q q 5 5 q q q q)"
+output="$(run_menu 2 3 4 q q q q)"
+assert_contains "$output" "高级配置"
+assert_contains "$output" "自定义 DNS  ·  系统默认"
+assert_contains "$output" "DNS IP 偏好  ·  自动选择"
+assert_contains "$output" "出口网卡  ·  未绑定"
+assert_contains "$output" "运行模式  ·  default"
+
+output="$(run_menu 2 4 q q q)"
 assert_contains "$output" "重启服务"
 assert_contains "$output" "关闭开机自启"
 assert_contains "$output" "停止服务"
-assert_contains "$output" "切换运行模式"
+
+output="$(run_menu 2 5 5 q q q q)"
 assert_contains "$output" "日志与维护"
 assert_contains "$output" "备份与恢复"
 
