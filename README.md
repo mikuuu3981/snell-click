@@ -12,7 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/mikuuu3981/snell-click/main/snell.s
 
 主面板会同时显示 v5 和 v6 的状态，并可直接进入对应实例。每个实例的常用操作按安装、客户端、配置、服务、日志与维护分组；配置页只保留端口、PSK 和 IPv6，高级选项单独收纳，脚本会为两个实例选择不同的可用端口。
 
-安装时可以直接输入监听端口；留空则自动选择 `20000-40000` 之间的可用端口。重装时留空会保留当前端口，也可以输入新端口。脚本会在写入配置前验证端口范围并检查 TCP/UDP 占用。
+安装时会提示输入监听端口；也可以使用 `snell v6 install 23606` 或 `SNELL_PORT=23606 snell v6 install` 直接指定。留空则自动选择 `20000-40000` 之间的可用端口。重装时留空会保留当前端口，也可以输入新端口。脚本会在写入配置前验证端口范围并检查 TCP/UDP 占用。
 
 交互面板会在终端中使用颜色区分运行状态、普通操作、升级和危险操作；所有菜单都可以按 `q` 返回上一级，主菜单按 `q` 退出。设置 `NO_COLOR=1` 可以关闭颜色输出。
 
@@ -64,6 +64,8 @@ sudo snell status-all
 
 sudo snell v5 install
 sudo snell v6 install
+# 也可以直接指定监听端口；安装前会检查 TCP/UDP 占用
+sudo snell v6 install 23606
 
 sudo snell v5 status
 sudo snell v6 status

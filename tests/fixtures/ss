@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+[ "${SS_FAIL:-false}" = "true" ] && exit 1
+
 if [ -r "${CONF_PATH:-}" ]; then
   port="$(awk -F: '/^[[:space:]]*listen[[:space:]]*=/ { print $NF; exit }' "$CONF_PATH" | tr -d '[:space:]')"
   [ -n "$port" ] && printf 'LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\n' "$port"
+fi
+
+if [ -n "${SS_OCCUPIED_TCP_PORT:-}" ]; then
+  printf 'LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\n' "$SS_OCCUPIED_TCP_PORT"
+fi
+
+if [ -n "${SS_OCCUPIED_UDP_PORT:-}" ]; then
+  printf 'UNCONN 0 0 0.0.0.0:%s 0.0.0.0:*\n' "$SS_OCCUPIED_UDP_PORT"
 fi

@@ -71,6 +71,30 @@ run_snell set-port 24444 >/dev/null
 assert_file_contains "$CONF_PATH" "listen = 0.0.0.0:24444,[::]:24444"
 [ "$(stat -c '%a' "$CONF_PATH")" = "640" ]
 
+export SS_OCCUPIED_TCP_PORT=25554
+if run_snell set-port 25554 >/dev/null 2>&1; then
+  echo "断言失败: 已占用 TCP 端口应被拒绝" >&2
+  exit 1
+fi
+assert_file_contains "$CONF_PATH" "listen = 0.0.0.0:24444,[::]:24444"
+unset SS_OCCUPIED_TCP_PORT
+
+export SS_OCCUPIED_UDP_PORT=25555
+if run_snell set-port 25555 >/dev/null 2>&1; then
+  echo "断言失败: 已占用 UDP 端口应被拒绝" >&2
+  exit 1
+fi
+assert_file_contains "$CONF_PATH" "listen = 0.0.0.0:24444,[::]:24444"
+unset SS_OCCUPIED_UDP_PORT
+
+export SS_FAIL=true
+if run_snell set-port 25556 >/dev/null 2>&1; then
+  echo "断言失败: 端口探测失败时应拒绝修改" >&2
+  exit 1
+fi
+assert_file_contains "$CONF_PATH" "listen = 0.0.0.0:24444,[::]:24444"
+unset SS_FAIL
+
 run_snell set-mode unshaped >/dev/null
 assert_file_contains "$CONF_PATH" "mode = unshaped"
 

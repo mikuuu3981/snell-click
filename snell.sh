@@ -17,7 +17,7 @@ SNELL_V5_VERSION="${SNELL_V5_VERSION:-v5.0.1}"
 SNELL_V6_VERSION="${SNELL_V6_VERSION:-v6.0.0b4}"
 SNELL_PROTOCOL="${SNELL_PROTOCOL:-v6}"         # v5 / v6
 SNELL_VERSION_OVERRIDE="${SNELL_VERSION:-}"
-SNELL_PORT="${SNELL_PORT:-}"                  # 留空则随机选择 20000-40000
+SNELL_PORT="${SNELL_PORT:-}"                  # 非交互安装时留空则随机选择 20000-40000
 SNELL_MODE="${SNELL_MODE:-default}"           # default / unshaped / unsafe-raw
 SNELL_IPV6_OVERRIDE="${SNELL_IPV6:-}"
 DOWNLOAD_BASE="${DOWNLOAD_BASE:-https://dl.nssurge.com/snell}"
@@ -449,19 +449,52 @@ gen_psk() {
 }
 
 tcp_port_in_use() {
-  local port="$1"
-  command -v ss >/dev/null 2>&1 || return 1
-  CONF_PATH="$CONF_PATH" ss -H -ltn 2>/dev/null | awk -v suffix=":${port}" '$4 ~ suffix "$" { found=1 } END { exit !found }'
+  local port="$1" output
+  command -v ss >/dev/null 2>&1 || return 2
+  if ! output="$(CONF_PATH="$CONF_PATH" ss -H -ltn 2>/dev/null)"; then
+    return 2
+  fi
+  awk -v suffix=":${port}" '$4 ~ suffix "$" { found=1 } END { exit !found }' <<<"$output"
 }
 
 udp_port_in_use() {
-  local port="$1"
-  command -v ss >/dev/null 2>&1 || return 1
-  CONF_PATH="$CONF_PATH" ss -H -lun 2>/dev/null | awk -v suffix=":${port}" '$4 ~ suffix "$" { found=1 } END { exit !found }'
+  local port="$1" output
+  command -v ss >/dev/null 2>&1 || return 2
+  if ! output="$(CONF_PATH="$CONF_PATH" ss -H -lun 2>/dev/null)"; then
+    return 2
+  fi
+  awk -v suffix=":${port}" '$4 ~ suffix "$" { found=1 } END { exit !found }' <<<"$output"
 }
 
 port_in_use() {
-  tcp_port_in_use "$1" || udp_port_in_use "$1"
+  local status
+  if tcp_port_in_use "$1"; then
+    return 0
+  else
+    status=$?
+  fi
+  [ "$status" -gt 1 ] && return "$status"
+  if udp_port_in_use "$1"; then
+    return 0
+  else
+    status=$?
+  fi
+  [ "$status" -gt 1 ] && return "$status"
+  return 1
+}
+
+# Return 0 when the port is free, 1 when occupied, and 2 when it cannot be
+# inspected. Callers must reject the third state instead of treating it as
+# availability.
+port_availability() {
+  local status
+  if port_in_use "$1"; then
+    return 1
+  else
+    status=$?
+  fi
+  [ "$status" -eq 1 ] && return 0
+  return 2
 }
 
 transport_label() {
@@ -469,22 +502,34 @@ transport_label() {
 }
 
 pick_port() {
-  local candidate attempts=0
+  local candidate attempts=0 status
   if [ -n "$SNELL_PORT" ]; then
     validate_port "$SNELL_PORT" || { red "SNELL_PORT 必须是 1-65535 的整数。" >&2; return 1; }
-    if port_in_use "$SNELL_PORT"; then
-      red "端口 ${SNELL_PORT} 已被占用。" >&2
+    if port_availability "$SNELL_PORT"; then
+      echo "$SNELL_PORT"
+      return 0
+    else
+      status=$?
+      if [ "$status" -eq 1 ]; then
+        red "端口 ${SNELL_PORT} 已被占用。" >&2
+      else
+        red "无法检测端口 ${SNELL_PORT} 是否被占用。" >&2
+      fi
       return 1
     fi
-    echo "$SNELL_PORT"
-    return 0
   fi
 
   while [ "$attempts" -lt 50 ]; do
     candidate=$(( RANDOM % 20001 + 20000 ))
-    if ! port_in_use "$candidate"; then
+    if port_availability "$candidate"; then
       echo "$candidate"
       return 0
+    else
+      status=$?
+    fi
+    if [ "$status" -gt 1 ]; then
+      red "无法检测随机端口是否被占用。" >&2
+      return 1
     fi
     attempts=$((attempts + 1))
   done
@@ -493,10 +538,13 @@ pick_port() {
 }
 
 install_port_available() {
-  local requested="$1" current=""
-  if ! port_in_use "$requested"; then
+  local requested="$1" current="" status
+  if port_availability "$requested"; then
     return 0
+  else
+    status=$?
   fi
+  [ "$status" -gt 1 ] && return "$status"
   if is_installed && service_is_active; then
     current="$(current_port)"
     [ "$requested" = "$current" ] && return 0
@@ -504,8 +552,25 @@ install_port_available() {
   return 1
 }
 
+read_install_port() {
+  local prompt="$1" tty_fd
+  if [ -t 0 ]; then
+    read -r -p "$prompt" REPLY
+  elif [ -r /dev/tty ] && exec {tty_fd}</dev/tty 2>/dev/null; then
+    # A script piped to bash has a non-terminal stdin, but can still use the
+    # controlling terminal for the install prompt.
+    if ! read -r -u "$tty_fd" -p "$prompt" REPLY; then
+      exec {tty_fd}<&-
+      return 1
+    fi
+    exec {tty_fd}<&-
+  else
+    return 1
+  fi
+}
+
 choose_install_port() {
-  local requested="${SNELL_PORT:-}" current=""
+  local requested="${1:-${SNELL_PORT:-}}" current="" status
   if is_installed; then
     current="$(current_port)"
     validate_port "$current" || current=""
@@ -513,18 +578,29 @@ choose_install_port() {
 
   if [ -n "$requested" ]; then
     validate_port "$requested" || { red "SNELL_PORT 必须是 1-65535 的整数。" >&2; return 1; }
-    install_port_available "$requested" || { red "端口 ${requested} 已被占用。" >&2; return 1; }
-    printf '%s\n' "$requested"
+    if install_port_available "$requested"; then
+      printf '%s\n' "$requested"
+    else
+      status=$?
+      if [ "$status" -eq 2 ]; then
+        red "无法检测端口 ${requested} 是否被占用。" >&2
+      else
+        red "端口 ${requested} 已被占用。" >&2
+      fi
+      return 1
+    fi
     return 0
   fi
 
-  if [ -t 0 ]; then
+  if [ -t 0 ] || [ -r /dev/tty ]; then
     while true; do
       if [ -n "$current" ]; then
-        read -r -p "监听端口 [当前 ${current}，留空保留]: " requested
+        read_install_port "监听端口 [当前 ${current}，留空保留]: " || break
+        requested="$REPLY"
         requested="${requested:-$current}"
       else
-        read -r -p "监听端口 [留空自动选择 20000-40000]: " requested
+        read_install_port "监听端口 [留空自动选择 20000-40000]: " || break
+        requested="$REPLY"
         if [ -z "$requested" ]; then
           pick_port
           return
@@ -534,12 +610,17 @@ choose_install_port() {
         red "端口必须是 1-65535 的整数，请重新输入。" >&2
         continue
       fi
-      if ! install_port_available "$requested"; then
+      if install_port_available "$requested"; then
+        printf '%s\n' "$requested"
+        return 0
+      else
+        status=$?
+        if [ "$status" -eq 2 ]; then
+          red "无法检测端口 ${requested} 是否被占用，请稍后重试。" >&2
+          return 1
+        fi
         red "端口 ${requested} 已被占用，请选择其他端口。" >&2
-        continue
       fi
-      printf '%s\n' "$requested"
-      return 0
     done
   fi
 
@@ -630,6 +711,10 @@ ensure_dependencies() {
   info "安装依赖: ${missing[*]}"
   apt-get update -y >/dev/null
   DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" >/dev/null
+  command -v ss >/dev/null 2>&1 || {
+    red "端口检测工具 ss 安装失败，已中止安装。"
+    return 1
+  }
 }
 
 download_binary() {
@@ -678,7 +763,7 @@ show_existing() {
 }
 
 do_install() {
-  local answer psk port staged_binary
+  local requested_port="${1:-}" answer psk port staged_binary
   need_root
   have_systemd || { red "未检测到 systemd，无法安装服务。"; return 1; }
   if [ "$SNELL_PROTOCOL" = "v6" ]; then
@@ -701,9 +786,11 @@ do_install() {
     esac
   fi
 
-  port="$(choose_install_port)" || return 1
-  info "监听端口: ${port}"
+  # Port inspection must run after dependencies are available; otherwise a
+  # missing `ss` would make every port look available.
   ensure_dependencies || return 1
+  port="$(choose_install_port "$requested_port")" || return 1
+  info "监听端口: ${port}"
   psk="$(gen_psk)" || return 1
   staged_binary="$(mktemp)" || { red "无法创建临时文件。"; return 1; }
   rm -f "$staged_binary"
@@ -895,12 +982,21 @@ apply_config() {
 }
 
 set_port() {
-  local port="${1:-}" old_port
+  local port="${1:-}" old_port status
   old_port="$(current_port)"
   validate_port "$port" || { red "端口必须是 1-65535 的整数。"; return 1; }
-  if [ "$port" != "$old_port" ] && port_in_use "$port"; then
-    red "端口 ${port} 已被其他程序占用。"
-    return 1
+  if [ "$port" != "$old_port" ]; then
+    if port_availability "$port"; then
+      :
+    else
+      status=$?
+      if [ "$status" -eq 2 ]; then
+        red "无法检测端口 ${port} 是否被占用。"
+      else
+        red "端口 ${port} 已被其他程序占用。"
+      fi
+      return 1
+    fi
   fi
   apply_config "$port" "$(current_psk)" "$(current_ipv6)" "$(current_mode)"
 }
@@ -1695,7 +1791,7 @@ Snell v5 / v6 多实例安装与配置管理
   register-command           注册 / 更新 snell 短命令
   self-update                检查并升级管理面板
   migrate [v5|v6]            将旧 snell.service 迁移为独立实例
-  install                    安装或重装所选实例；交互时可指定端口
+  install [端口]             安装或重装所选实例；交互时可指定端口
   uninstall                  卸载并清理所选实例
   status                     查看运行概览
   client [服务器地址]        输出 Surge 与 mihomo 客户端配置
@@ -1722,8 +1818,8 @@ Snell v5 / v6 多实例安装与配置管理
   SNELL_MANAGER_URL, NO_COLOR
 
 示例:
-  snell v5 install
-  snell v6 install
+  snell v5 install [端口]
+  snell v6 install [端口]
   snell status-all
   snell self-update
   snell migrate
@@ -1737,7 +1833,7 @@ if [ "${1:-}" = "v5" ] || [ "${1:-}" = "v6" ]; then
 fi
 
 case "${1:-menu}" in
-  install)      do_install ;;
+  install)      do_install "${2:-}" ;;
   uninstall)    do_uninstall ;;
   status)       show_status ;;
   client|config) show_client_config "${2:-}" ;;
