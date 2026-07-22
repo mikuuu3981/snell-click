@@ -52,7 +52,7 @@ assert_file_contains() {
 }
 
 setup_instance v5 v5.0.1 23505
-setup_instance v6 v6.0.0b4 23606
+setup_instance v6 v6.0.0rc 23606
 
 occupied_command="${BIN_DIR}/occupied-snell"
 printf '#!/usr/bin/env bash\necho occupied\n' > "$occupied_command"
@@ -74,7 +74,7 @@ run_snell register-command >/dev/null
 [ -x "${BIN_DIR}/snell" ]
 output="$("${BIN_DIR}/snell" status-all)"
 assert_contains "$output" "v5.0.1"
-assert_contains "$output" "v6.0.0b4"
+assert_contains "$output" "v6.0.0rc"
 run_snell register-command >/dev/null
 
 manager_update="${TEMP_DIR}/manager-update.sh"
@@ -97,7 +97,7 @@ cmp -s "$manager_update" "${BIN_DIR}/snell"
 output="$(run_snell status-all)"
 assert_contains "$output" "v5"
 assert_contains "$output" "v5.0.1"
-assert_contains "$output" "v6.0.0b4"
+assert_contains "$output" "v6.0.0rc"
 assert_contains "$output" "TCP/UDP"
 
 output="$(run_snell v5 client v5.example.com)"

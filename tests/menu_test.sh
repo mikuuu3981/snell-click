@@ -93,7 +93,7 @@ output="$(run_menu 1 3 4 q q q q)"
 assert_contains "$output" "自定义 DNS  ·  系统默认"
 assert_not_contains "$output" "运行模式  ·"
 
-setup_instance v6 v6.0.0b4 23606
+setup_instance v6 v6.0.0rc 23606
 output="$(run_menu 2 3 4 q q q q)"
 assert_contains "$output" "高级配置"
 assert_contains "$output" "自定义 DNS  ·  系统默认"

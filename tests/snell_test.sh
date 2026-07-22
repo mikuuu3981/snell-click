@@ -31,8 +31,8 @@ egress-interface = eth9
 EOF
 chown root:nogroup "$CONF_PATH"
 chmod 640 "$CONF_PATH"
-printf 'v6.0.0b4\n' > "$VERSION_PATH"
-printf '[Unit]\nDescription=Snell Proxy Server v6.0.0b4\n' > "$SERVICE_PATH"
+printf 'v6.0.0rc\n' > "$VERSION_PATH"
+printf '[Unit]\nDescription=Snell Proxy Server v6.0.0rc\n' > "$SERVICE_PATH"
 
 run_snell() {
   bash "${ROOT_DIR}/snell.sh" "$@"

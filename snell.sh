@@ -14,7 +14,7 @@ set -euo pipefail
 
 # ---------------- 可自定义 ----------------
 SNELL_V5_VERSION="${SNELL_V5_VERSION:-v5.0.1}"
-SNELL_V6_VERSION="${SNELL_V6_VERSION:-v6.0.0b4}"
+SNELL_V6_VERSION="${SNELL_V6_VERSION:-v6.0.0rc}"
 SNELL_PROTOCOL="${SNELL_PROTOCOL:-v6}"         # v5 / v6
 SNELL_VERSION_OVERRIDE="${SNELL_VERSION:-}"
 SNELL_PORT="${SNELL_PORT:-}"                  # 非交互安装时留空则随机选择 20000-40000

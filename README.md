@@ -33,7 +33,7 @@ v5 默认采用官方向导一致的 IPv4 监听，v6 默认启用 IPv4/IPv6 双
 | 配置 | `/etc/snell/v5/snell-server.conf` | `/etc/snell/v6/snell-server.conf` |
 | 备份 | `/etc/snell/v5/backups/` | `/etc/snell/v6/backups/` |
 | 服务 | `snell-v5.service` | `snell-v6.service` |
-| 默认版本 | `v5.0.1` | `v6.0.0b4` |
+| 默认版本 | `v5.0.1` | `v6.0.0rc` |
 
 修改、重启、更新或卸载一个实例不会改动另一个实例。两个实例不能监听相同端口，脚本会在安装和端口修改时检查 TCP、UDP 占用。
 
@@ -79,7 +79,7 @@ sudo snell v6 set-mode unshaped
 sudo snell v5 restart
 sudo snell v6 diagnose
 sudo snell v5 update v5.0.1
-sudo snell v6 update v6.0.0b4
+sudo snell v6 update v6.0.0rc
 ```
 
 其他配置命令 `set-ipv6`、`set-dns`、`set-dns-preference`、`set-egress`、`logs`、`backup` 和 `restore` 同样接受版本前缀。运行 `snell help` 查看完整列表。
