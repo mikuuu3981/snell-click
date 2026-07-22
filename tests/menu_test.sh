@@ -79,7 +79,9 @@ assert_not_contains "$output" "选择要管理的实例"
 assert_not_contains "$output" "迁移旧版单实例"
 
 output="$(run_menu 1 1 q '' q q)"
+assert_contains "$output" "│               Snell 核心管理               │"
 assert_contains "$output" "安装 Snell 核心"
+assert_contains "$output" "│              安装 Snell 核心               │"
 assert_contains "$output" "Snell v5  ·  稳定版 v5.0.1"
 assert_contains "$output" "Snell v6  ·  Beta v6.0.0rc"
 assert_contains "$output" "q) 返回 Snell 管理"
@@ -88,6 +90,7 @@ assert_not_contains "$output" "服务控制"
 
 output="$(run_menu 2 q q)"
 assert_contains "$output" "Xray 核心管理"
+assert_contains "$output" "│               Xray 核心管理                │"
 assert_contains "$output" "安装 / 修复 Xray 核心"
 
 printf '#!/usr/bin/env bash\nexit 0\n' > "${BIN_DIR}/snell-server-v5"

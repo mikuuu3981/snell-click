@@ -2155,7 +2155,7 @@ snell_panel_header() {
   local -a protocols=()
   mapfile -t protocols < <(snell_present_protocols)
   printf '%b\n' "${C_CYAN}${C_BOLD}╭────────────────────────────────────────────╮${C_RESET}"
-  printf '%b\n' "${C_CYAN}${C_BOLD}│${C_RESET}              ${C_WHITE}${C_BOLD}Snell 核心管理${C_RESET}              ${C_CYAN}${C_BOLD}│${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}│${C_RESET}               ${C_WHITE}${C_BOLD}Snell 核心管理${C_RESET}               ${C_CYAN}${C_BOLD}│${C_RESET}"
   printf '%b\n' "${C_CYAN}${C_BOLD}╰────────────────────────────────────────────╯${C_RESET}"
   if [ "${#protocols[@]}" -eq 0 ]; then
     core_summary_row "Snell" "未安装" "-"
@@ -2262,7 +2262,7 @@ xray_panel_header() {
   fi
   status_style="$(state_color "$state")"
   printf '%b\n' "${C_CYAN}${C_BOLD}╭────────────────────────────────────────────╮${C_RESET}"
-  printf '%b\n' "${C_CYAN}${C_BOLD}│${C_RESET}              ${C_WHITE}${C_BOLD}Xray 核心管理${C_RESET}               ${C_CYAN}${C_BOLD}│${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}│${C_RESET}               ${C_WHITE}${C_BOLD}Xray 核心管理${C_RESET}                ${C_CYAN}${C_BOLD}│${C_RESET}"
   printf '%b\n' "${C_CYAN}${C_BOLD}╰────────────────────────────────────────────╯${C_RESET}"
   printf '  %b状态%b  %b%-10s%b  %b版本%b  %b%-14s%b  %b配置%b  %s\n\n' \
     "$C_GRAY" "$C_RESET" "$status_style" "$state" "$C_RESET" \
@@ -2397,7 +2397,7 @@ choose_snell_install_version() {
   local choice answer
   clear_screen
   printf '%b\n' "${C_CYAN}${C_BOLD}╭────────────────────────────────────────────╮${C_RESET}"
-  printf '%b\n' "${C_CYAN}${C_BOLD}│${C_RESET}              ${C_WHITE}${C_BOLD}安装 Snell 核心${C_RESET}              ${C_CYAN}${C_BOLD}│${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}│${C_RESET}              ${C_WHITE}${C_BOLD}安装 Snell 核心${C_RESET}               ${C_CYAN}${C_BOLD}│${C_RESET}"
   printf '%b\n' "${C_CYAN}${C_BOLD}╰────────────────────────────────────────────╯${C_RESET}"
   section_title "选择协议版本"
   menu_option 1 "Snell v5  ·  稳定版 ${SNELL_V5_VERSION}"
