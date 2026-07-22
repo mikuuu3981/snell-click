@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${XRAY_UNZIP_FIXTURE:-false}" = "true" ]; then
+  destination=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-d" ]; then
+      destination="$2"
+      shift 2
+    else
+      shift
+    fi
+  done
+  [ -n "$destination" ]
+  mkdir -p "$destination"
+  {
+    echo '#!/usr/bin/env bash'
+    printf 'version=%q\n' "${XRAY_FIXTURE_VERSION:-26.3.27}"
+    cat <<'EOF'
+set -euo pipefail
+case "${1:-}" in
+  version) printf 'Xray %s (Xray, Penetrates Everything.) test\n' "$version" ;;
+  run)
+    [ "${XRAY_CONFIG_TEST_FAIL:-false}" = "true" ] && exit 1
+    printf 'Configuration OK.\n'
+    ;;
+esac
+EOF
+  } > "${destination}/xray"
+  chmod 755 "${destination}/xray"
+  printf 'geoip fixture\n' > "${destination}/geoip.dat"
+  printf 'geosite fixture\n' > "${destination}/geosite.dat"
+  exit 0
+fi
+
+if [ -x /usr/bin/unzip ]; then
+  exec /usr/bin/unzip "$@"
+elif [ -x /bin/unzip ]; then
+  exec /bin/unzip "$@"
+fi
+exit 127

@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 #
-# Snell v5 / v6 多实例配置管理面板 (Debian/Ubuntu, root)
+# 多核心代理配置管理面板 (Debian/Ubuntu, root)
+# Snell v5 / v6 多实例配置管理面板（保留此标记用于旧版自更新校验）
 #
 # 常用命令:
 #   snell                          打开交互式管理面板
 #   snell v6 install               安装 / 重装 v6
 #   snell v5 status                查看 v5 运行概览
 #   snell v6 client [地址]         输出 v6 客户端配置
+#   snell xray install             安装最新 Xray 核心
+#   snell xray status              查看 Xray 核心状态
 #   snell self-update              升级管理面板
 #   snell help                     查看全部命令
 #
@@ -22,6 +25,9 @@ SNELL_MODE="${SNELL_MODE:-default}"           # default / unshaped / unsafe-raw
 SNELL_IPV6_OVERRIDE="${SNELL_IPV6:-}"
 DOWNLOAD_BASE="${DOWNLOAD_BASE:-https://dl.nssurge.com/snell}"
 SNELL_MANAGER_URL="${SNELL_MANAGER_URL:-https://raw.githubusercontent.com/mikuuu3981/snell-click/main/snell.sh}"
+XRAY_VERSION="${XRAY_VERSION:-}"
+XRAY_RELEASE_API="${XRAY_RELEASE_API:-https://api.github.com/repos/XTLS/Xray-core/releases/latest}"
+XRAY_DOWNLOAD_BASE="${XRAY_DOWNLOAD_BASE:-https://github.com/XTLS/Xray-core/releases/download}"
 # -------------------------------------------
 
 SNELL_BASE_DIR="${SNELL_BASE_DIR:-/etc/snell}"
@@ -41,6 +47,13 @@ LEGACY_VERSION_PATH="${LEGACY_VERSION_PATH:-${SNELL_BASE_DIR}/version}"
 LEGACY_BACKUP_DIR="${LEGACY_BACKUP_DIR:-${SNELL_BASE_DIR}/backups}"
 LEGACY_SERVICE_PATH="${LEGACY_SERVICE_PATH:-${SYSTEMD_DIR}/snell.service}"
 LEGACY_SERVICE_NAME="${LEGACY_SERVICE_NAME:-snell}"
+XRAY_BIN_PATH="${XRAY_BIN_PATH:-${BIN_DIR}/xray}"
+XRAY_CONFIG_DIR="${XRAY_CONFIG_DIR:-/usr/local/etc/xray}"
+XRAY_CONFIG_PATH="${XRAY_CONFIG_PATH:-${XRAY_CONFIG_DIR}/config.json}"
+XRAY_ASSET_DIR="${XRAY_ASSET_DIR:-/usr/local/share/xray}"
+XRAY_LOG_DIR="${XRAY_LOG_DIR:-/var/log/xray}"
+XRAY_SERVICE_PATH="${XRAY_SERVICE_PATH:-${SYSTEMD_DIR}/xray.service}"
+XRAY_SERVICE_NAME="${XRAY_SERVICE_NAME:-xray}"
 
 use_instance() {
   local protocol="${1:-}"
@@ -106,7 +119,7 @@ menu_option() {
 
 state_color() {
   case "${1:-}" in
-    运行中|已安装|已注册|是) printf '%s' "$C_GREEN" ;;
+    运行中|已安装|已注册|有效|是) printf '%s' "$C_GREEN" ;;
     已停止|未安装|否) printf '%s' "$C_YELLOW" ;;
     *) printf '%s' "$C_RED" ;;
   esac
@@ -261,7 +274,7 @@ update_manager() {
     return 1
   fi
   rm -f "$staged"
-  success "管理面板已升级；退出后重新运行 snell 即可使用，v5/v6 配置与服务均保持不变。"
+  success "管理面板已升级；退出后重新运行 snell 即可使用，所有核心配置与服务均保持不变。"
 }
 
 have_systemd() {
@@ -275,6 +288,431 @@ detect_arch() {
     i386|i686)     echo "i386" ;;
     *) red "不支持的架构: $(uname -m)"; return 1 ;;
   esac
+}
+
+xray_detect_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64)  echo "64" ;;
+    aarch64|arm64) echo "arm64-v8a" ;;
+    i386|i686)     echo "32" ;;
+    *) red "Xray 不支持当前架构: $(uname -m)" >&2; return 1 ;;
+  esac
+}
+
+validate_xray_version() {
+  [[ "${1:-}" =~ ^v[0-9][0-9A-Za-z._-]*$ ]]
+}
+
+xray_core_installed() {
+  [ -x "$XRAY_BIN_PATH" ]
+}
+
+xray_is_installed() {
+  xray_core_installed && [ -f "$XRAY_CONFIG_PATH" ] && [ -f "$XRAY_SERVICE_PATH" ]
+}
+
+xray_has_files() {
+  [ -e "$XRAY_BIN_PATH" ] || [ -e "$XRAY_CONFIG_PATH" ] || [ -e "$XRAY_SERVICE_PATH" ] ||
+    [ -e "${XRAY_ASSET_DIR}/geoip.dat" ] || [ -e "${XRAY_ASSET_DIR}/geosite.dat" ]
+}
+
+xray_has_core_files() {
+  [ -e "$XRAY_BIN_PATH" ] || [ -e "$XRAY_SERVICE_PATH" ] ||
+    [ -e "${XRAY_ASSET_DIR}/geoip.dat" ] || [ -e "${XRAY_ASSET_DIR}/geosite.dat" ]
+}
+
+xray_service_is_active() {
+  [ -f "$XRAY_SERVICE_PATH" ] && have_systemd &&
+    systemctl is-active --quiet "$XRAY_SERVICE_NAME" 2>/dev/null
+}
+
+xray_service_is_enabled() {
+  [ -f "$XRAY_SERVICE_PATH" ] && have_systemd &&
+    systemctl is-enabled --quiet "$XRAY_SERVICE_NAME" 2>/dev/null
+}
+
+xray_installed_version() {
+  local output version
+  xray_core_installed || { echo "unknown"; return 0; }
+  output="$("$XRAY_BIN_PATH" version 2>&1 || true)"
+  version="$(printf '%s\n' "$output" | awk '/^Xray[[:space:]]+[0-9]/ { print $2; exit }')"
+  [ -n "$version" ] && printf 'v%s\n' "${version#v}" || echo "unknown"
+}
+
+fetch_xray_release_metadata() {
+  local source="$XRAY_RELEASE_API" local_source
+  if [ -f "$source" ]; then
+    cat "$source"
+  elif [[ "$source" == file://* ]]; then
+    local_source="${source#file://}"
+    [ -f "$local_source" ] || return 1
+    cat "$local_source"
+  elif command -v curl >/dev/null 2>&1; then
+    curl -fsSL --max-time 20 "$source"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -T 20 -O - "$source"
+  else
+    return 1
+  fi
+}
+
+xray_latest_version() {
+  local metadata version
+  if ! metadata="$(fetch_xray_release_metadata)"; then
+    red "无法获取 Xray 最新版本，请检查 GitHub 网络连接。" >&2
+    return 1
+  fi
+  version="$(printf '%s\n' "$metadata" |
+    sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  validate_xray_version "$version" || {
+    red "Xray 发布接口返回了无效版本。" >&2
+    return 1
+  }
+  printf '%s\n' "$version"
+}
+
+resolve_xray_version() {
+  local requested="${1:-${XRAY_VERSION:-}}"
+  if [ -z "$requested" ]; then
+    xray_latest_version
+    return
+  fi
+  validate_xray_version "$requested" || {
+    red "Xray 版本格式无效: ${requested}" >&2
+    return 1
+  }
+  printf '%s\n' "$requested"
+}
+
+xray_ensure_dependencies() {
+  local missing=()
+  command -v unzip >/dev/null 2>&1 || missing+=("unzip")
+  command -v sha256sum >/dev/null 2>&1 || missing+=("coreutils")
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    missing+=("curl")
+  fi
+  [ "${#missing[@]}" -eq 0 ] && return 0
+  command -v apt-get >/dev/null 2>&1 || {
+    red "缺少 Xray 安装依赖: ${missing[*]}，且当前系统没有 apt-get。"
+    return 1
+  }
+  info "安装 Xray 依赖: ${missing[*]}"
+  if ! apt-get update -y >/dev/null ||
+     ! DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" >/dev/null; then
+    red "Xray 安装依赖失败。"
+    return 1
+  fi
+}
+
+download_url_to_file() {
+  local url="$1" destination="$2" local_source
+  if [ -f "$url" ]; then
+    cp "$url" "$destination"
+  elif [[ "$url" == file://* ]]; then
+    local_source="${url#file://}"
+    [ -f "$local_source" ] && cp "$local_source" "$destination"
+  elif command -v curl >/dev/null 2>&1; then
+    curl -fL --retry 2 --connect-timeout 10 "$url" -o "$destination"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --show-progress -O "$destination" "$url"
+  else
+    return 1
+  fi
+}
+
+download_xray_package() {
+  local version="$1" destination="$2" arch package url archive digest_file expected actual
+  validate_xray_version "$version" || { red "Xray 版本格式无效: $version"; return 1; }
+  if ! arch="$(xray_detect_arch)"; then return 1; fi
+  package="Xray-linux-${arch}.zip"
+  url="${XRAY_DOWNLOAD_BASE}/${version}/${package}"
+  archive="${destination}/${package}"
+  digest_file="${archive}.dgst"
+  info "下载 ${url}"
+  if ! download_url_to_file "$url" "$archive"; then
+    red "Xray 下载失败，请检查版本号和网络连接。"
+    return 1
+  fi
+  if ! download_url_to_file "${url}.dgst" "$digest_file"; then
+    red "无法下载 Xray SHA-256 校验摘要，已拒绝安装。"
+    return 1
+  fi
+  expected="$(sed -n 's/^SHA2-256=[[:space:]]*//p' "$digest_file" | head -n 1)"
+  actual="$(sha256sum "$archive" | awk '{ print $1 }')"
+  if ! [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]] || [ "${expected,,}" != "${actual,,}" ]; then
+    red "Xray 安装包 SHA-256 校验失败。"
+    return 1
+  fi
+  if ! unzip -oq "$archive" -d "$destination" || [ ! -f "${destination}/xray" ]; then
+    red "Xray 安装包无效或缺少核心文件。"
+    return 1
+  fi
+  chmod 755 "${destination}/xray"
+}
+
+xray_config_is_valid_with() {
+  local binary="$1" config="$2"
+  [ -x "$binary" ] && [ -r "$config" ] &&
+    "$binary" run -test -config "$config" >/dev/null 2>&1
+}
+
+xray_config_is_valid() {
+  xray_config_is_valid_with "$XRAY_BIN_PATH" "$XRAY_CONFIG_PATH"
+}
+
+write_xray_service() {
+  local temp
+  mkdir -p "$(dirname "$XRAY_SERVICE_PATH")" || return 1
+  temp="$(mktemp "${XRAY_SERVICE_PATH}.XXXXXX")" || return 1
+  cat > "$temp" <<EOF
+[Unit]
+Description=Xray Core Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nobody
+Group=nogroup
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=true
+LimitNPROC=10000
+LimitNOFILE=1000000
+ExecStart=${XRAY_BIN_PATH} run -config ${XRAY_CONFIG_PATH}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 644 "$temp"
+  mv -f "$temp" "$XRAY_SERVICE_PATH"
+}
+
+prepare_xray_logs() {
+  local log_file
+  mkdir -p "$XRAY_LOG_DIR" || return 1
+  chown root:root "$XRAY_LOG_DIR" || return 1
+  chmod 755 "$XRAY_LOG_DIR" || return 1
+  for log_file in access.log error.log; do
+    if [ ! -e "${XRAY_LOG_DIR}/${log_file}" ]; then
+      install -o nobody -g nogroup -m 600 /dev/null "${XRAY_LOG_DIR}/${log_file}" || return 1
+    else
+      chown nobody:nogroup "${XRAY_LOG_DIR}/${log_file}" || return 1
+      chmod 600 "${XRAY_LOG_DIR}/${log_file}" || return 1
+    fi
+  done
+}
+
+rollback_xray_install() {
+  local rollback_dir="$1" config_created="$2" was_active="$3" was_enabled="$4"
+  systemctl stop "$XRAY_SERVICE_NAME" 2>/dev/null || true
+
+  if [ -f "${rollback_dir}/xray" ]; then
+    install -m 755 "${rollback_dir}/xray" "$XRAY_BIN_PATH" 2>/dev/null || true
+  else
+    rm -f "$XRAY_BIN_PATH"
+  fi
+  mkdir -p "$XRAY_ASSET_DIR"
+  if [ -f "${rollback_dir}/geoip.dat" ]; then
+    cp -p "${rollback_dir}/geoip.dat" "${XRAY_ASSET_DIR}/geoip.dat" 2>/dev/null || true
+  else
+    rm -f "${XRAY_ASSET_DIR}/geoip.dat"
+  fi
+  if [ -f "${rollback_dir}/geosite.dat" ]; then
+    cp -p "${rollback_dir}/geosite.dat" "${XRAY_ASSET_DIR}/geosite.dat" 2>/dev/null || true
+  else
+    rm -f "${XRAY_ASSET_DIR}/geosite.dat"
+  fi
+  if [ -f "${rollback_dir}/xray.service" ]; then
+    cp -p "${rollback_dir}/xray.service" "$XRAY_SERVICE_PATH" 2>/dev/null || true
+  else
+    rm -f "$XRAY_SERVICE_PATH"
+  fi
+  [ "$config_created" = "true" ] && rm -f "$XRAY_CONFIG_PATH"
+
+  systemctl daemon-reload 2>/dev/null || true
+  if [ "$was_enabled" = "true" ]; then
+    systemctl enable "$XRAY_SERVICE_NAME" 2>/dev/null || true
+  else
+    systemctl disable "$XRAY_SERVICE_NAME" 2>/dev/null || true
+  fi
+  if [ "$was_active" = "true" ]; then
+    systemctl restart "$XRAY_SERVICE_NAME" 2>/dev/null || true
+  fi
+}
+
+install_xray_core() {
+  local requested="${1:-}" version old_version staged rollback validation_config
+  local had_installation=false was_active=false was_enabled=false config_created=false
+  need_root
+  have_systemd || { red "未检测到 systemd，无法管理 Xray 服务。"; return 1; }
+  xray_ensure_dependencies || return 1
+  if ! version="$(resolve_xray_version "$requested")"; then return 1; fi
+  old_version="$(xray_installed_version)"
+  xray_is_installed && had_installation=true
+  xray_service_is_active && was_active=true
+  xray_service_is_enabled && was_enabled=true
+  staged="$(mktemp -d)" || { red "无法创建 Xray 临时目录。"; return 1; }
+  rollback="$(mktemp -d)" || { rm -rf "$staged"; red "无法创建 Xray 回滚目录。"; return 1; }
+
+  if ! download_xray_package "$version" "$staged"; then
+    rm -rf "$staged" "$rollback"
+    return 1
+  fi
+  if [ -f "$XRAY_CONFIG_PATH" ]; then
+    validation_config="$XRAY_CONFIG_PATH"
+  else
+    validation_config="${staged}/config.json"
+    printf '{}\n' > "$validation_config"
+  fi
+  if ! xray_config_is_valid_with "${staged}/xray" "$validation_config"; then
+    rm -rf "$staged" "$rollback"
+    red "当前 Xray 配置无法通过新核心校验，已取消安装。"
+    return 1
+  fi
+
+  if [ -e "$XRAY_BIN_PATH" ] && ! cp -p "$XRAY_BIN_PATH" "${rollback}/xray"; then
+    rm -rf "$staged" "$rollback"; red "无法备份现有 Xray 核心。"; return 1
+  fi
+  if [ -e "${XRAY_ASSET_DIR}/geoip.dat" ] &&
+     ! cp -p "${XRAY_ASSET_DIR}/geoip.dat" "${rollback}/geoip.dat"; then
+    rm -rf "$staged" "$rollback"; red "无法备份 geoip.dat。"; return 1
+  fi
+  if [ -e "${XRAY_ASSET_DIR}/geosite.dat" ] &&
+     ! cp -p "${XRAY_ASSET_DIR}/geosite.dat" "${rollback}/geosite.dat"; then
+    rm -rf "$staged" "$rollback"; red "无法备份 geosite.dat。"; return 1
+  fi
+  if [ -e "$XRAY_SERVICE_PATH" ] &&
+     ! cp -p "$XRAY_SERVICE_PATH" "${rollback}/xray.service"; then
+    rm -rf "$staged" "$rollback"; red "无法备份 Xray 服务文件。"; return 1
+  fi
+
+  if ! mkdir -p "$(dirname "$XRAY_BIN_PATH")" "$(dirname "$XRAY_CONFIG_PATH")" "$XRAY_ASSET_DIR"; then
+    rm -rf "$staged" "$rollback"; red "无法创建 Xray 安装目录。"; return 1
+  fi
+  if ! install -m 755 "${staged}/xray" "$XRAY_BIN_PATH" ||
+     { [ -f "${staged}/geoip.dat" ] && ! install -m 644 "${staged}/geoip.dat" "${XRAY_ASSET_DIR}/geoip.dat"; } ||
+     { [ -f "${staged}/geosite.dat" ] && ! install -m 644 "${staged}/geosite.dat" "${XRAY_ASSET_DIR}/geosite.dat"; }; then
+    rollback_xray_install "$rollback" "$config_created" "$was_active" "$was_enabled"
+    rm -rf "$staged" "$rollback"
+    red "Xray 核心文件安装失败，已恢复原状态。"
+    return 1
+  fi
+  if [ ! -f "$XRAY_CONFIG_PATH" ]; then
+    if ! install -o root -g nogroup -m 640 "$validation_config" "$XRAY_CONFIG_PATH"; then
+      rollback_xray_install "$rollback" "$config_created" "$was_active" "$was_enabled"
+      rm -rf "$staged" "$rollback"
+      red "Xray 初始配置写入失败，已恢复原状态。"
+      return 1
+    fi
+    config_created=true
+  fi
+  if [ ! -f "$XRAY_SERVICE_PATH" ] && ! write_xray_service; then
+    rollback_xray_install "$rollback" "$config_created" "$was_active" "$was_enabled"
+    rm -rf "$staged" "$rollback"
+    red "Xray 服务文件写入失败，已恢复原状态。"
+    return 1
+  fi
+  if ! prepare_xray_logs; then
+    rollback_xray_install "$rollback" "$config_created" "$was_active" "$was_enabled"
+    rm -rf "$staged" "$rollback"
+    red "Xray 日志目录准备失败，已恢复原状态。"
+    return 1
+  fi
+  if ! systemctl daemon-reload || ! systemctl enable "$XRAY_SERVICE_NAME"; then
+    rollback_xray_install "$rollback" "$config_created" "$was_active" "$was_enabled"
+    rm -rf "$staged" "$rollback"
+    red "Xray 服务注册失败，已恢复原状态。"
+    return 1
+  fi
+
+  if [ "$had_installation" = "false" ] || [ "$was_active" = "true" ]; then
+    if ! systemctl restart "$XRAY_SERVICE_NAME" || ! sleep 1 || ! xray_service_is_active; then
+      rollback_xray_install "$rollback" "$config_created" "$was_active" "$was_enabled"
+      rm -rf "$staged" "$rollback"
+      red "Xray 新核心启动失败，已恢复 ${old_version:-原状态}。"
+      return 1
+    fi
+  fi
+
+  rm -rf "$staged" "$rollback"
+  if [ "$had_installation" = "true" ]; then
+    success "Xray 已从 ${old_version} 更新到 ${version}。"
+    [ "$was_active" = "true" ] || success "Xray 服务保持停止状态。"
+  else
+    success "Xray ${version} 安装成功。"
+    [ -s "$XRAY_CONFIG_PATH" ] && [ "$(tr -d '[:space:]' < "$XRAY_CONFIG_PATH")" = "{}" ] &&
+      warn "当前是空配置；请编辑 ${XRAY_CONFIG_PATH} 后再添加代理入站。"
+  fi
+}
+
+xray_service_action() {
+  local action="$1" label
+  need_root
+  xray_is_installed || { red "Xray 尚未完整安装。"; return 1; }
+  case "$action" in
+    start|restart)
+      xray_config_is_valid || { red "Xray 配置校验失败，已拒绝启动。"; return 1; }
+      systemctl "$action" "$XRAY_SERVICE_NAME" || return 1
+      sleep 1
+      xray_service_is_active || { red "Xray 服务未正常启动。"; return 1; }
+      [ "$action" = "start" ] && label="启动" || label="重启"
+      success "Xray 服务已${label}。"
+      ;;
+    stop) systemctl stop "$XRAY_SERVICE_NAME" && success "Xray 服务已停止。" ;;
+    enable) systemctl enable "$XRAY_SERVICE_NAME" && success "Xray 已开启开机自启。" ;;
+    disable) systemctl disable "$XRAY_SERVICE_NAME" && success "Xray 已关闭开机自启。" ;;
+    *) red "不支持的 Xray 服务操作: $action"; return 1 ;;
+  esac
+}
+
+show_xray_status() {
+  local state="未安装" service_state="未注册" autostart="否" config_state="缺失"
+  xray_core_installed && state="已安装"
+  if xray_service_is_active; then service_state="运行中"; elif [ -f "$XRAY_SERVICE_PATH" ]; then service_state="已停止"; fi
+  xray_service_is_enabled && autostart="是"
+  if [ -f "$XRAY_CONFIG_PATH" ]; then
+    if xray_config_is_valid; then config_state="有效"; else config_state="无效"; fi
+  fi
+  section_title "Xray 核心状态"
+  detail_row "核心状态" "$state" "$(state_color "$state")"
+  detail_row "核心版本" "$(xray_installed_version)"
+  detail_row "服务状态" "$service_state" "$(state_color "$service_state")"
+  detail_row "开机自启" "$autostart" "$(state_color "$autostart")"
+  detail_row "配置状态" "$config_state"
+  detail_row "核心路径" "$XRAY_BIN_PATH"
+  detail_row "配置路径" "$XRAY_CONFIG_PATH"
+}
+
+show_xray_logs() {
+  local lines="${1:-100}"
+  [[ "$lines" =~ ^[1-9][0-9]*$ ]] || { red "日志行数必须是正整数。"; return 1; }
+  command -v journalctl >/dev/null 2>&1 || { red "系统没有 journalctl。"; return 1; }
+  journalctl -u "$XRAY_SERVICE_NAME" -n "$lines" --no-pager
+}
+
+follow_xray_logs() {
+  command -v journalctl >/dev/null 2>&1 || { red "系统没有 journalctl。"; return 1; }
+  journalctl -u "$XRAY_SERVICE_NAME" -f
+}
+
+uninstall_xray_core() {
+  need_root
+  xray_has_core_files || { yellow "未检测到 Xray 核心，无需卸载。"; return 0; }
+  if have_systemd; then
+    systemctl stop "$XRAY_SERVICE_NAME" 2>/dev/null || true
+    systemctl disable "$XRAY_SERVICE_NAME" 2>/dev/null || true
+  fi
+  rm -f "$XRAY_BIN_PATH" "$XRAY_SERVICE_PATH" \
+    "${XRAY_ASSET_DIR}/geoip.dat" "${XRAY_ASSET_DIR}/geosite.dat"
+  rmdir "$XRAY_ASSET_DIR" 2>/dev/null || true
+  if have_systemd; then
+    systemctl daemon-reload
+    systemctl reset-failed "$XRAY_SERVICE_NAME" 2>/dev/null || true
+  fi
+  success "Xray 核心和服务已卸载；配置与日志保持不变。"
 }
 
 is_installed() {
@@ -1088,6 +1526,7 @@ show_status() {
   detail_row "状态" "$state" "$status_style"
   detail_row "开机自启" "$enabled" "$enabled_style"
   detail_row "版本" "${version:-unknown}" "$C_MAGENTA"
+  [ "$SNELL_PROTOCOL" = "v6" ] && detail_row "发布通道" "Beta" "$C_YELLOW"
   detail_row "监听" "$listen_state" "$C_YELLOW"
   [ "$SNELL_PROTOCOL" = "v6" ] && detail_row "模式" "${mode:-未知}" "$C_BLUE"
   detail_row "IPv6" "${ipv6:-未知}" "$C_CYAN"
@@ -1340,6 +1779,7 @@ panel_header() {
   if is_installed; then
     service_is_active && state="运行中" || state="已停止"
     version="$(installed_version)"
+    [ "$SNELL_PROTOCOL" = "v6" ] && version="${version} Beta"
     port="$(current_port)"
   elif has_installation_files; then
     state="安装不完整"
@@ -1648,7 +2088,7 @@ instance_menu() {
     else
       menu_option 1 "安装 Snell ${SNELL_PROTOCOL}"
     fi
-    menu_option q "返回主菜单" back
+    menu_option q "返回上一级" back
     echo
     read -r -p "请选择: " choice
     case "$choice" in
@@ -1688,6 +2128,7 @@ instance_summary_row() {
   if is_installed; then
     service_is_active && state="运行中" || state="已停止"
     version="$(installed_version)"
+    [ "$protocol" = "v6" ] && version="${version} Beta"
     port="$(current_port)"
     transport="$(transport_label)"
   elif has_installation_files; then
@@ -1710,22 +2151,336 @@ show_all_status() {
   use_instance "$selected"
 }
 
-multi_panel_header() {
+snell_panel_header() {
+  local -a protocols=()
+  mapfile -t protocols < <(snell_present_protocols)
   printf '%b\n' "${C_CYAN}${C_BOLD}╭────────────────────────────────────────────╮${C_RESET}"
-  printf '%b\n' "${C_CYAN}${C_BOLD}│${C_RESET}          ${C_WHITE}${C_BOLD}Snell v5 / v6 管理控制台${C_RESET}          ${C_CYAN}${C_BOLD}│${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}│${C_RESET}              ${C_WHITE}${C_BOLD}Snell 核心管理${C_RESET}              ${C_CYAN}${C_BOLD}│${C_RESET}"
   printf '%b\n' "${C_CYAN}${C_BOLD}╰────────────────────────────────────────────╯${C_RESET}"
-  show_all_status
+  if [ "${#protocols[@]}" -eq 0 ]; then
+    core_summary_row "Snell" "未安装" "-"
+  else
+    show_all_status
+  fi
   if legacy_has_files; then
     printf '  %b旧实例%b  检测到 snell.service (%s)，可从菜单迁移\n' "$C_YELLOW" "$C_RESET" "$(legacy_installed_version | sed 's/^$/版本未知/')"
   fi
   echo
 }
 
+core_summary_row() {
+  local name="$1" state="$2" detail="$3" status_style
+  status_style="$(state_color "$state")"
+  printf '  %b%-7s%b %b%-10s%b %s\n' \
+    "${C_CYAN}${C_BOLD}" "$name" "$C_RESET" \
+    "$status_style" "$state" "$C_RESET" "$detail"
+}
+
+show_core_status() {
+  local selected="$SNELL_PROTOCOL" protocol state detail version
+  local snell_state="未安装" snell_detail="-" active_count=0 installed_count=0 partial_count=0
+  local -a instance_details=()
+
+  for protocol in v5 v6; do
+    use_instance "$protocol"
+    if is_installed; then
+      installed_count=$((installed_count + 1))
+      version="$(installed_version)"
+      if service_is_active; then
+        active_count=$((active_count + 1))
+        [ "$protocol" = "v6" ] && version="${version} Beta"
+        instance_details+=("${version}")
+      else
+        [ "$protocol" = "v6" ] && version="${version} Beta"
+        instance_details+=("${version}")
+      fi
+    elif has_installation_files; then
+      partial_count=$((partial_count + 1))
+      instance_details+=("${protocol} 待修复")
+    fi
+  done
+  use_instance "$selected"
+  if [ "${#instance_details[@]}" -eq 1 ]; then
+    snell_detail="${instance_details[0]}"
+  elif [ "${#instance_details[@]}" -gt 1 ]; then
+    snell_detail="v5 / v6 共存（兼容模式）"
+  fi
+  if [ "$active_count" -gt 0 ]; then
+    snell_state="运行中"
+  elif [ "$installed_count" -gt 0 ]; then
+    snell_state="已停止"
+  elif [ "$partial_count" -gt 0 ]; then
+    snell_state="安装不完整"
+  fi
+
+  if xray_service_is_active; then
+    state="运行中"
+  elif xray_core_installed; then
+    state="已停止"
+  elif xray_has_core_files; then
+    state="安装不完整"
+  else
+    state="未安装"
+  fi
+  if xray_core_installed; then
+    detail="$(xray_installed_version)"
+  elif [ -f "$XRAY_CONFIG_PATH" ]; then
+    detail="已保留配置"
+  else
+    detail="-"
+  fi
+
+  printf '%b\n' "${C_BOLD}${C_WHITE}核心概览${C_RESET}"
+  printf '%b  %-7s %-10s %s%b\n' "$C_GRAY" "核心" "状态" "详情" "$C_RESET"
+  core_summary_row "Snell" "$snell_state" "$snell_detail"
+  core_summary_row "Xray" "$state" "$detail"
+  echo
+}
+
+main_panel_header() {
+  printf '%b\n' "${C_CYAN}${C_BOLD}   ____ ___  ____  _____${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}  / ___/ _ \\|  _ \\| ____|${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD} | |  | | | | |_) |  _|${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD} | |__| |_| |  _ <| |___${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}  \\____\\___/|_| \\_\\_____|${C_RESET}"
+  printf '%b\n\n' "${C_MAGENTA}${C_BOLD}          Hello World!${C_RESET}"
+  show_core_status
+}
+
+xray_panel_header() {
+  local state="未安装" version="-" config_state="缺失" status_style
+  if xray_service_is_active; then
+    state="运行中"
+  elif xray_core_installed; then
+    state="已停止"
+  elif xray_has_core_files; then
+    state="安装不完整"
+  fi
+  xray_core_installed && version="$(xray_installed_version)"
+  if [ -f "$XRAY_CONFIG_PATH" ]; then
+    if xray_core_installed && xray_config_is_valid; then config_state="有效"; else config_state="待检查"; fi
+  fi
+  status_style="$(state_color "$state")"
+  printf '%b\n' "${C_CYAN}${C_BOLD}╭────────────────────────────────────────────╮${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}│${C_RESET}              ${C_WHITE}${C_BOLD}Xray 核心管理${C_RESET}               ${C_CYAN}${C_BOLD}│${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}╰────────────────────────────────────────────╯${C_RESET}"
+  printf '  %b状态%b  %b%-10s%b  %b版本%b  %b%-14s%b  %b配置%b  %s\n\n' \
+    "$C_GRAY" "$C_RESET" "$status_style" "$state" "$C_RESET" \
+    "$C_GRAY" "$C_RESET" "$C_MAGENTA" "$version" "$C_RESET" \
+    "$C_GRAY" "$C_RESET" "$config_state"
+}
+
+prompt_xray_install() {
+  local action="$1" version answer action_label default_label="${XRAY_VERSION:-最新稳定版}"
+  [ "$action" = "update" ] && action_label="更新" || action_label="安装"
+  read -r -p "目标版本 [${default_label}]: " version
+  if [ "$action" = "update" ]; then
+    warn "更新会重启 Xray；经由该核心的现有连接可能暂时中断。"
+  fi
+  read -r -p "确认${action_label} Xray ${version:-${default_label}}? [y/N] " answer
+  if [[ "$answer" =~ ^[yY]$ ]]; then
+    install_xray_core "$version"
+  else
+    yellow "已取消。"
+  fi
+}
+
+xray_service_menu() {
+  local choice primary_action primary_label autostart_action autostart_label
+  while true; do
+    clear_screen
+    xray_panel_header
+    section_title "Xray 服务控制"
+    if xray_service_is_active; then primary_action="restart"; primary_label="重启服务"; else primary_action="start"; primary_label="启动服务"; fi
+    if xray_service_is_enabled; then autostart_action="disable"; autostart_label="关闭开机自启"; else autostart_action="enable"; autostart_label="开启开机自启"; fi
+    menu_option 1 "$primary_label"
+    menu_option 2 "$autostart_label"
+    xray_service_is_active && menu_option 3 "停止服务"
+    menu_option q "返回 Xray 管理" back
+    echo
+    read -r -p "请选择: " choice
+    case "$choice" in
+      1) xray_service_action "$primary_action" || true; pause_screen ;;
+      2) xray_service_action "$autostart_action" || true; pause_screen ;;
+      3) if xray_service_is_active; then xray_service_action stop || true; else yellow "无效选择。"; fi; pause_screen ;;
+      0|q|Q) return 0 ;;
+      *) yellow "无效选择。"; pause_screen ;;
+    esac
+  done
+}
+
+xray_logs_menu() {
+  local choice
+  while true; do
+    clear_screen
+    xray_panel_header
+    section_title "Xray 日志"
+    menu_option 1 "查看最近日志"
+    menu_option 2 "实时跟踪日志"
+    menu_option q "返回 Xray 管理" back
+    echo
+    read -r -p "请选择: " choice
+    case "$choice" in
+      1) clear_screen; show_xray_logs 100 || true; pause_screen ;;
+      2) clear_screen; follow_xray_logs || true; pause_screen ;;
+      0|q|Q) return 0 ;;
+      *) yellow "无效选择。"; pause_screen ;;
+    esac
+  done
+}
+
+xray_menu() {
+  local choice answer
+  need_root
+  [ -t 0 ] || { red "交互式面板需要在终端中运行。"; return 1; }
+  while true; do
+    clear_screen
+    xray_panel_header
+    section_title "常用操作"
+    if xray_is_installed; then
+      menu_option 1 "查看核心状态"
+      menu_option 2 "更新 Xray 核心" accent
+      menu_option 3 "检查配置"
+      menu_option 4 "服务控制"
+      menu_option 5 "日志"
+      menu_option 6 "卸载 Xray 核心（保留配置）" danger
+    else
+      menu_option 1 "安装 / 修复 Xray 核心" accent
+      xray_has_files && menu_option 2 "查看现有文件状态"
+      xray_has_core_files && menu_option 3 "清理 Xray 核心（保留配置）" danger
+    fi
+    menu_option q "返回主菜单" back
+    echo
+    read -r -p "请选择: " choice
+    if ! xray_is_installed; then
+      case "$choice" in
+        1) prompt_xray_install install || true; pause_screen ;;
+        2) if xray_has_files; then clear_screen; show_xray_status; else yellow "无效选择。"; fi; pause_screen ;;
+        3)
+          if ! xray_has_core_files; then yellow "无效选择。"; pause_screen; continue; fi
+          read -r -p "确认清理 Xray 核心和服务并保留配置? [y/N] " answer
+          if [[ "$answer" =~ ^[yY]$ ]]; then uninstall_xray_core; else yellow "已取消。"; fi
+          pause_screen
+          ;;
+        0|q|Q) return 0 ;;
+        *) yellow "无效选择。"; pause_screen ;;
+      esac
+      continue
+    fi
+    case "$choice" in
+      1) clear_screen; show_xray_status; pause_screen ;;
+      2) prompt_xray_install update || true; pause_screen ;;
+      3) if xray_config_is_valid; then success "Xray 配置有效。"; else red "Xray 配置校验失败。"; fi; pause_screen ;;
+      4) xray_service_menu ;;
+      5) xray_logs_menu ;;
+      6)
+        read -r -p "确认卸载 Xray 核心和服务并保留配置? [y/N] " answer
+        if [[ "$answer" =~ ^[yY]$ ]]; then uninstall_xray_core; else yellow "已取消。"; fi
+        pause_screen
+        ;;
+      0|q|Q) return 0 ;;
+      *) yellow "无效选择。"; pause_screen ;;
+    esac
+  done
+}
+
+snell_present_protocols() {
+  local selected="$SNELL_PROTOCOL" protocol
+  for protocol in v5 v6; do
+    use_instance "$protocol"
+    if has_installation_files; then printf '%s\n' "$protocol"; fi
+  done
+  use_instance "$selected"
+}
+
+choose_snell_install_version() {
+  local choice answer
+  clear_screen
+  printf '%b\n' "${C_CYAN}${C_BOLD}╭────────────────────────────────────────────╮${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}│${C_RESET}              ${C_WHITE}${C_BOLD}安装 Snell 核心${C_RESET}              ${C_CYAN}${C_BOLD}│${C_RESET}"
+  printf '%b\n' "${C_CYAN}${C_BOLD}╰────────────────────────────────────────────╯${C_RESET}"
+  section_title "选择协议版本"
+  menu_option 1 "Snell v5  ·  稳定版 ${SNELL_V5_VERSION}"
+  menu_option 2 "Snell v6  ·  Beta ${SNELL_V6_VERSION}" accent
+  menu_option q "返回 Snell 管理" back
+  echo
+  read -r -p "请选择: " choice
+  case "$choice" in
+    1) use_instance v5; do_install ;;
+    2)
+      warn "Snell v6 当前仍为 Beta，服务端与客户端可能发生不兼容变更。"
+      warn "请确保 Surge 客户端同步更新到支持 ${SNELL_V6_VERSION} 的版本。"
+      read -r -p "确认安装 Snell v6 Beta? [y/N] " answer
+      if [[ "$answer" =~ ^[yY]$ ]]; then use_instance v6; do_install; else yellow "已取消。"; fi
+      ;;
+    0|q|Q) return 0 ;;
+    *) yellow "无效选择。" ;;
+  esac
+}
+
+snell_menu() {
+  local choice detected answer
+  local -a protocols=()
+  while true; do
+    mapfile -t protocols < <(snell_present_protocols)
+    if [ "${#protocols[@]}" -eq 1 ]; then
+      use_instance "${protocols[0]}"
+      instance_menu
+      return
+    fi
+    clear_screen
+    snell_panel_header
+    section_title "Snell 管理"
+    if [ "${#protocols[@]}" -eq 0 ]; then
+      menu_option 1 "安装 Snell" accent
+      legacy_has_files && menu_option 2 "迁移旧版单实例"
+    else
+      warn "检测到 v5 与 v6 同时存在，以下版本选择仅用于兼容现有双实例。"
+      menu_option 1 "管理现有 Snell v5"
+      menu_option 2 "管理现有 Snell v6 Beta"
+      legacy_has_files && menu_option 3 "迁移旧版单实例"
+    fi
+    menu_option q "返回主菜单" back
+    echo
+    read -r -p "请选择: " choice
+    if [ "${#protocols[@]}" -eq 0 ]; then
+      case "$choice" in
+        1) choose_snell_install_version || true; pause_screen ;;
+        2)
+          if ! legacy_has_files; then yellow "无效选择。"; pause_screen; continue; fi
+          detected="$(legacy_protocol 2>/dev/null || true)"
+          if [ -z "$detected" ]; then read -r -p "无法自动识别版本，请输入 v5 或 v6: " detected; fi
+          read -r -p "将旧实例迁移为 ${detected:-未知} 独立实例? [y/N] " answer
+          if [[ "$answer" =~ ^[yY]$ ]]; then migrate_legacy "$detected" || true; else yellow "已取消。"; fi
+          pause_screen
+          ;;
+        0|q|Q) return 0 ;;
+        *) yellow "无效选择。"; pause_screen ;;
+      esac
+      continue
+    fi
+    case "$choice" in
+      1) use_instance v5; instance_menu ;;
+      2) use_instance v6; instance_menu ;;
+      3)
+        if ! legacy_has_files; then yellow "无效选择。"; pause_screen; continue; fi
+        detected="$(legacy_protocol 2>/dev/null || true)"
+        if [ -z "$detected" ]; then read -r -p "无法自动识别版本，请输入 v5 或 v6: " detected; fi
+        read -r -p "将旧实例迁移为 ${detected:-未知} 独立实例? [y/N] " answer
+        if [[ "$answer" =~ ^[yY]$ ]]; then migrate_legacy "$detected" || true; else yellow "已取消。"; fi
+        pause_screen
+        ;;
+      0|q|Q) return 0 ;;
+      *) yellow "无效选择。"; pause_screen ;;
+    esac
+  done
+}
+
 manager_settings_menu() {
   local choice answer command_state="未注册" command_style
   while true; do
     clear_screen
-    multi_panel_header
+    main_panel_header
     if is_snell_manager_script "$SNELL_COMMAND_PATH"; then
       command_state="已注册"
     else
@@ -1754,7 +2509,7 @@ manager_settings_menu() {
 }
 
 menu() {
-  local choice detected answer
+  local choice
   need_root
   [ -t 0 ] || { red "交互式面板需要在终端中运行。"; return 1; }
   if ! register_short_command true; then
@@ -1764,52 +2519,64 @@ menu() {
   fi
   while true; do
     clear_screen
-    multi_panel_header
+    main_panel_header
     section_title "主菜单"
-    menu_option 1 "管理 Snell v5"
-    menu_option 2 "管理 Snell v6"
+    menu_option 1 "Snell 管理"
+    menu_option 2 "Xray 管理"
     menu_option 3 "面板设置 / 升级" accent
-    legacy_has_files && menu_option 4 "迁移旧版单实例"
     menu_option q "退出" back
     echo
     read -r -p "请选择: " choice
     case "$choice" in
-      1) use_instance v5; instance_menu ;;
-      2) use_instance v6; instance_menu ;;
+      1) snell_menu ;;
+      2) xray_menu ;;
       3) manager_settings_menu ;;
-      4)
-        if ! legacy_has_files; then
-          yellow "无效选择。"
-          pause_screen
-          continue
-        fi
-        detected="$(legacy_protocol 2>/dev/null || true)"
-        if [ -z "$detected" ]; then
-          read -r -p "无法自动识别版本，请输入 v5 或 v6: " detected
-        fi
-        read -r -p "将旧实例迁移为 ${detected:-未知} 独立实例? [y/N] " answer
-        if [[ "$answer" =~ ^[yY]$ ]]; then migrate_legacy "$detected" || true; else yellow "已取消。"; fi
-        pause_screen
-        ;;
       0|q|Q) echo "已退出。"; return 0 ;;
       *) yellow "无效选择。"; pause_screen ;;
     esac
   done
 }
 
+xray_usage() {
+  cat <<'EOF'
+Xray 核心管理
+
+用法:
+  snell xray <命令> [参数]
+
+命令:
+  manage                     打开 Xray 交互面板
+  status                     查看核心、配置和服务状态
+  latest                     查询 GitHub 最新稳定版本
+  install [版本]             安装或修复 Xray；省略版本时安装最新版
+  update [版本]              更新 Xray；省略版本时更新到最新版
+  test                       校验当前 config.json
+  start|stop|restart         控制 Xray 服务
+  enable|disable             控制开机自启
+  logs [行数]                查看最近日志（默认 100 行）
+  logs-follow                实时跟踪日志
+  uninstall                 卸载核心和服务，保留 config.json
+EOF
+}
+
 usage() {
   cat <<'EOF'
-Snell v5 / v6 多实例安装与配置管理
+多核心代理安装与配置管理
 
 用法:
   snell [v5|v6] [命令] [参数]
+  snell xray <命令> [参数]
 
-命令:
+通用命令:
   menu                       打开统一交互面板（默认）
-  manage                     打开所选版本的实例面板
-  status-all                 查看 v5 与 v6 概览
+  xray <命令>                管理 Xray 核心
+  status-all                 查看 Snell v5 与 v6 概览
   register-command           注册 / 更新 snell 短命令
   self-update                检查并升级管理面板
+  help                       显示帮助
+
+Snell 命令:
+  manage                     打开所选版本的实例面板
   migrate [v5|v6]            将旧 snell.service 迁移为独立实例
   install [端口]             安装或重装所选实例；交互时可指定端口
   uninstall                  卸载并清理所选实例
@@ -1830,22 +2597,49 @@ Snell v5 / v6 多实例安装与配置管理
   backup                     创建配置备份
   restore <备份文件>         恢复指定配置备份
   update [版本]              更新 Snell 内核（默认使用脚本内版本）
-  help                       显示帮助
 
 可用环境变量:
   SNELL_PROTOCOL, SNELL_VERSION, SNELL_V5_VERSION, SNELL_V6_VERSION,
   SNELL_PORT, SNELL_MODE, SNELL_IPV6, DOWNLOAD_BASE, SNELL_COMMAND_PATH,
-  SNELL_MANAGER_URL, NO_COLOR
+  SNELL_MANAGER_URL, XRAY_VERSION, XRAY_RELEASE_API, XRAY_DOWNLOAD_BASE,
+  XRAY_BIN_PATH, XRAY_CONFIG_PATH, XRAY_ASSET_DIR, XRAY_LOG_DIR,
+  XRAY_SERVICE_PATH, NO_COLOR
 
 示例:
   snell v5 install [端口]
   snell v6 install [端口]
   snell status-all
+  snell xray install
+  snell xray status
   snell self-update
   snell migrate
   snell v5 client snell.example.com
 EOF
 }
+
+if [ "${1:-}" = "xray" ]; then
+  shift
+  case "${1:-manage}" in
+    manage|menu) xray_menu ;;
+    status) show_xray_status ;;
+    latest) xray_latest_version ;;
+    install) install_xray_core "${2:-}" ;;
+    update)
+      xray_is_installed || { red "Xray 尚未完整安装，请先运行: snell xray install"; exit 1; }
+      install_xray_core "${2:-}"
+      ;;
+    test)
+      if xray_config_is_valid; then success "Xray 配置有效。"; else red "Xray 配置校验失败。"; exit 1; fi
+      ;;
+    start|stop|restart|enable|disable) xray_service_action "$1" ;;
+    logs) show_xray_logs "${2:-100}" ;;
+    logs-follow) follow_xray_logs ;;
+    uninstall) uninstall_xray_core ;;
+    help|-h|--help) xray_usage ;;
+    *) red "未知 Xray 命令: $1"; echo; xray_usage; exit 1 ;;
+  esac
+  exit
+fi
 
 if [ "${1:-}" = "v5" ] || [ "${1:-}" = "v6" ]; then
   use_instance "$1"
