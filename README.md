@@ -39,7 +39,7 @@ v5 默认采用官方向导一致的 IPv4 监听，v6 默认启用 IPv4/IPv6 双
 
 ## 面板功能
 
-- 独立安装、重装、更新和卸载 v5 或 v6
+- 独立安装、重装、更新 Snell 内核和卸载 v5 或 v6
 - 安装向导中主动指定端口，或留空自动选择可用端口
 - 双实例状态概览及单实例详细运行状态
 - 修改端口、PSK、IPv6、自定义 DNS、DNS IP 偏好和出口网卡
@@ -83,6 +83,21 @@ sudo snell v6 update v6.0.0rc
 ```
 
 其他配置命令 `set-ipv6`、`set-dns`、`set-dns-preference`、`set-egress`、`logs`、`backup` 和 `restore` 同样接受版本前缀。运行 `snell help` 查看完整列表。
+
+## Snell 内核更新
+
+进入任一已安装实例后，可以直接选择“更新 Snell 内核”；该入口也保留在“日志与维护”页面。命令行用法为：
+
+```bash
+sudo snell v5 update
+sudo snell v6 update
+# 也可以明确指定目标版本
+sudo snell v6 update v6.0.0rc
+```
+
+省略版本时使用管理脚本内置的对应版本。更新会保留配置、端口和 PSK，下载并替换服务端二进制，然后重启对应实例；如果新版本未能正常启动，脚本会自动恢复旧二进制和版本信息。
+
+重启 Snell 时，经过该实例的现有连接可能中断。如果当前 SSH 本身经由正在更新的 Snell 实例，SSH 断线并不能单独证明更新失败；代理恢复后应重新连接并运行 `sudo snell v5 status` 或 `sudo snell v6 status` 核验。
 
 ## 管理面板升级
 

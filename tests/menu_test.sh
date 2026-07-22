@@ -106,8 +106,15 @@ assert_contains "$output" "重启服务"
 assert_contains "$output" "关闭开机自启"
 assert_contains "$output" "停止服务"
 
+output="$(run_menu 2 6 '' n '' q q)"
+assert_contains "$output" "更新 Snell 内核"
+assert_contains "$output" "目标版本 [v6.0.0rc]"
+assert_contains "$output" "SSH 经由该实例连接"
+assert_contains "$output" "已取消"
+
 output="$(run_menu 2 5 5 q q q q)"
 assert_contains "$output" "日志与维护"
 assert_contains "$output" "备份与恢复"
+assert_contains "$output" "更新 Snell 内核"
 
 echo "menu_test: all assertions passed"

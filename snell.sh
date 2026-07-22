@@ -1281,6 +1281,20 @@ update_server() {
   fi
 }
 
+prompt_server_update() {
+  local version answer
+  read -r -p "目标版本 [${SNELL_VERSION}]: " version
+  version="${version:-$SNELL_VERSION}"
+  warn "更新会重启 Snell ${SNELL_PROTOCOL}；现有代理连接可能暂时中断。"
+  warn "如果当前 SSH 经由该实例连接，断线本身不代表更新失败，请重连后查看状态。"
+  read -r -p "确认更新 Snell ${SNELL_PROTOCOL} 内核到 ${version}? [y/N] " answer
+  if [[ "$answer" =~ ^[yY]$ ]]; then
+    update_server "$version"
+  else
+    yellow "已取消。"
+  fi
+}
+
 restore_backup() {
   local source="${1:-}" port psk ipv6 mode dns dns_preference egress_interface
   need_root
@@ -1510,7 +1524,7 @@ service_menu() {
 }
 
 maintenance_menu() {
-  local choice answer version
+  local choice answer
   while true; do
     has_installation_files || return 0
     clear_screen
@@ -1522,7 +1536,7 @@ maintenance_menu() {
       menu_option 3 "实时跟踪日志"
       menu_option 4 "一键诊断"
       menu_option 5 "备份与恢复"
-      menu_option 6 "更新服务端版本" accent
+      menu_option 6 "更新 Snell 内核" accent
       menu_option 7 "卸载 Snell" danger
     else
       menu_option 1 "查看安装详情"
@@ -1553,10 +1567,7 @@ maintenance_menu() {
       4) clear_screen; diagnose || true; pause_screen ;;
       5) backup_menu ;;
       6)
-        read -r -p "目标版本 [${SNELL_VERSION}]: " version
-        version="${version:-$SNELL_VERSION}"
-        read -r -p "确认更新到 ${version}? [y/N] " answer
-        if [[ "$answer" =~ ^[yY]$ ]]; then update_server "$version" || true; else yellow "已取消。"; fi
+        prompt_server_update || true
         pause_screen
         ;;
       7)
@@ -1630,6 +1641,7 @@ instance_menu() {
       menu_option 3 "修改配置"
       menu_option 4 "服务控制"
       menu_option 5 "日志与维护"
+      menu_option 6 "更新 Snell 内核" accent
     elif has_installation_files; then
       menu_option 1 "修复 Snell ${SNELL_PROTOCOL} 安装"
       menu_option 2 "诊断 / 清理残留"
@@ -1656,6 +1668,14 @@ instance_menu() {
       3) if is_installed; then configuration_menu; else yellow "无效选择。"; pause_screen; fi ;;
       4) if is_installed; then service_menu; else yellow "无效选择。"; pause_screen; fi ;;
       5) if is_installed; then maintenance_menu; else yellow "无效选择。"; pause_screen; fi ;;
+      6)
+        if is_installed; then
+          prompt_server_update || true
+        else
+          yellow "无效选择。"
+        fi
+        pause_screen
+        ;;
       0|q|Q) return 0 ;;
       *) yellow "无效选择。"; pause_screen ;;
     esac
@@ -1809,7 +1829,7 @@ Snell v5 / v6 多实例安装与配置管理
   diagnose                   检查安装、配置、服务与端口
   backup                     创建配置备份
   restore <备份文件>         恢复指定配置备份
-  update [版本]              更新服务端（默认使用脚本内版本）
+  update [版本]              更新 Snell 内核（默认使用脚本内版本）
   help                       显示帮助
 
 可用环境变量:
