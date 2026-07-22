@@ -71,8 +71,10 @@ assert_contains "$output" "Hello World!"
 assert_contains "$output" "核心概览"
 assert_contains "$output" "Snell 管理"
 assert_contains "$output" "Xray 管理"
-assert_contains "$output" "面板设置 / 升级"
+assert_contains "$output" "检查面板更新"
 assert_contains "$output" "q) 退出"
+assert_not_contains "$output" "面板设置 / 升级"
+assert_not_contains "$output" "注册 / 修复 snell 短命令"
 assert_not_contains "$output" "管理 Snell v5"
 assert_not_contains "$output" "管理 Snell v6"
 assert_not_contains "$output" "选择要管理的实例"
@@ -93,6 +95,10 @@ assert_contains "$output" "Xray 核心管理"
 assert_contains "$output" "│               Xray 核心管理                │"
 assert_contains "$output" "安装 / 修复 Xray 核心"
 
+output="$(run_menu 3 n '' q)"
+assert_contains "$output" "确认从官方仓库检查并升级管理面板"
+assert_contains "$output" "已取消"
+
 printf '#!/usr/bin/env bash\nexit 0\n' > "${BIN_DIR}/snell-server-v5"
 chmod 755 "${BIN_DIR}/snell-server-v5"
 output="$(run_menu 1 2 q q q)"
@@ -102,19 +108,22 @@ assert_contains "$output" "一键诊断"
 assert_contains "$output" "清理残留文件"
 
 setup_instance v5 v5.0.1 23505
-output="$(run_menu 1 3 q q q)"
+output="$(run_menu 1 2 q q q)"
+assert_contains "$output" "1) 生成客户端配置"
+assert_contains "$output" "5) 更新 Snell 内核"
+assert_not_contains "$output" "重装 Snell"
 assert_contains "$output" "修改配置"
 assert_contains "$output" "监听端口  ·  23505"
 assert_contains "$output" "IPv6  ·  已关闭"
 assert_contains "$output" "高级配置"
 assert_not_contains "$output" "自定义 DNS"
 
-output="$(run_menu 1 3 4 q q q q)"
+output="$(run_menu 1 2 4 q q q q)"
 assert_contains "$output" "自定义 DNS  ·  系统默认"
 assert_not_contains "$output" "运行模式  ·"
 
 setup_instance v6 v6.0.0rc 23606
-output="$(run_menu 1 2 3 4 q q q q q)"
+output="$(run_menu 1 2 2 4 q q q q q)"
 assert_contains "$output" "v5 与 v6 同时存在"
 assert_contains "$output" "Snell v6 Beta"
 assert_contains "$output" "高级配置"
@@ -123,20 +132,45 @@ assert_contains "$output" "DNS IP 偏好  ·  自动选择"
 assert_contains "$output" "出口网卡  ·  未绑定"
 assert_contains "$output" "运行模式  ·  default"
 
-output="$(run_menu 1 2 4 q q q q)"
+output="$(run_menu 1 2 3 q q q q)"
 assert_contains "$output" "重启服务"
 assert_contains "$output" "关闭开机自启"
 assert_contains "$output" "停止服务"
 
-output="$(run_menu 1 2 6 '' n '' q q q)"
+output="$(run_menu 1 2 5 '' n '' q q q)"
 assert_contains "$output" "更新 Snell 内核"
 assert_contains "$output" "目标版本 [v6.0.0rc]"
 assert_contains "$output" "SSH 经由该实例连接"
 assert_contains "$output" "已取消"
 
-output="$(run_menu 1 2 5 5 q q q q q)"
+output="$(run_menu 1 2 4 5 q q q q q)"
 assert_contains "$output" "日志与维护"
 assert_contains "$output" "备份与恢复"
 assert_contains "$output" "更新 Snell 内核"
+assert_contains "$output" "6) 卸载 Snell"
+assert_not_contains "$output" "6) 更新 Snell 内核"
+
+mkdir -p "$XRAY_CONFIG_DIR"
+cat > "$XRAY_BIN_PATH" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  version) echo 'Xray 26.3.27 (Xray, Penetrates Everything.) test' ;;
+  run) exit 0 ;;
+esac
+EOF
+chmod 755 "$XRAY_BIN_PATH"
+printf '{}\n' > "$XRAY_CONFIG_PATH"
+printf '[Unit]\nDescription=Xray test service\n' > "$XRAY_SERVICE_PATH"
+
+output="$(run_menu 2 q q)"
+assert_contains "$output" "1) 查看详细状态"
+assert_contains "$output" "3) 服务控制"
+assert_contains "$output" "4) 查看最近日志"
+assert_contains "$output" "5) 实时跟踪日志"
+assert_not_contains "$output" "检查配置"
+assert_not_contains "$output" "5) 日志"
+
+output="$(run_menu 2 4 '' q q)"
+assert_contains "$output" "snell test log"
 
 echo "menu_test: all assertions passed"

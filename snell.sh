@@ -1976,8 +1976,7 @@ maintenance_menu() {
       menu_option 3 "实时跟踪日志"
       menu_option 4 "一键诊断"
       menu_option 5 "备份与恢复"
-      menu_option 6 "更新 Snell 内核" accent
-      menu_option 7 "卸载 Snell" danger
+      menu_option 6 "卸载 Snell" danger
     else
       menu_option 1 "查看安装详情"
       menu_option 2 "一键诊断"
@@ -2007,10 +2006,6 @@ maintenance_menu() {
       4) clear_screen; diagnose || true; pause_screen ;;
       5) backup_menu ;;
       6)
-        prompt_server_update || true
-        pause_screen
-        ;;
-      7)
         read -r -p "这会删除程序、配置和备份，确认卸载? [y/N] " answer
         if [[ "$answer" =~ ^[yY]$ ]]; then do_uninstall; else yellow "已取消。"; fi
         pause_screen
@@ -2076,12 +2071,11 @@ instance_menu() {
     panel_header
     section_title "常用操作"
     if is_installed; then
-      menu_option 1 "重装 Snell ${SNELL_PROTOCOL}（可修改端口）"
-      menu_option 2 "生成客户端配置"
-      menu_option 3 "修改配置"
-      menu_option 4 "服务控制"
-      menu_option 5 "日志与维护"
-      menu_option 6 "更新 Snell 内核" accent
+      menu_option 1 "生成客户端配置"
+      menu_option 2 "修改配置"
+      menu_option 3 "服务控制"
+      menu_option 4 "日志与维护"
+      menu_option 5 "更新 Snell 内核" accent
     elif has_installation_files; then
       menu_option 1 "修复 Snell ${SNELL_PROTOCOL} 安装"
       menu_option 2 "诊断 / 清理残留"
@@ -2092,12 +2086,18 @@ instance_menu() {
     echo
     read -r -p "请选择: " choice
     case "$choice" in
-      1) do_install || true; pause_screen ;;
-      2)
+      1)
         if is_installed; then
           clear_screen
           show_client_config || true
-          pause_screen
+        else
+          do_install || true
+        fi
+        pause_screen
+        ;;
+      2)
+        if is_installed; then
+          configuration_menu
         elif has_installation_files; then
           maintenance_menu
         else
@@ -2105,10 +2105,9 @@ instance_menu() {
           pause_screen
         fi
         ;;
-      3) if is_installed; then configuration_menu; else yellow "无效选择。"; pause_screen; fi ;;
-      4) if is_installed; then service_menu; else yellow "无效选择。"; pause_screen; fi ;;
-      5) if is_installed; then maintenance_menu; else yellow "无效选择。"; pause_screen; fi ;;
-      6)
+      3) if is_installed; then service_menu; else yellow "无效选择。"; pause_screen; fi ;;
+      4) if is_installed; then maintenance_menu; else yellow "无效选择。"; pause_screen; fi ;;
+      5)
         if is_installed; then
           prompt_server_update || true
         else
@@ -2309,26 +2308,6 @@ xray_service_menu() {
   done
 }
 
-xray_logs_menu() {
-  local choice
-  while true; do
-    clear_screen
-    xray_panel_header
-    section_title "Xray 日志"
-    menu_option 1 "查看最近日志"
-    menu_option 2 "实时跟踪日志"
-    menu_option q "返回 Xray 管理" back
-    echo
-    read -r -p "请选择: " choice
-    case "$choice" in
-      1) clear_screen; show_xray_logs 100 || true; pause_screen ;;
-      2) clear_screen; follow_xray_logs || true; pause_screen ;;
-      0|q|Q) return 0 ;;
-      *) yellow "无效选择。"; pause_screen ;;
-    esac
-  done
-}
-
 xray_menu() {
   local choice answer
   need_root
@@ -2338,11 +2317,11 @@ xray_menu() {
     xray_panel_header
     section_title "常用操作"
     if xray_is_installed; then
-      menu_option 1 "查看核心状态"
+      menu_option 1 "查看详细状态"
       menu_option 2 "更新 Xray 核心" accent
-      menu_option 3 "检查配置"
-      menu_option 4 "服务控制"
-      menu_option 5 "日志"
+      menu_option 3 "服务控制"
+      menu_option 4 "查看最近日志"
+      menu_option 5 "实时跟踪日志"
       menu_option 6 "卸载 Xray 核心（保留配置）" danger
     else
       menu_option 1 "安装 / 修复 Xray 核心" accent
@@ -2370,9 +2349,9 @@ xray_menu() {
     case "$choice" in
       1) clear_screen; show_xray_status; pause_screen ;;
       2) prompt_xray_install update || true; pause_screen ;;
-      3) if xray_config_is_valid; then success "Xray 配置有效。"; else red "Xray 配置校验失败。"; fi; pause_screen ;;
-      4) xray_service_menu ;;
-      5) xray_logs_menu ;;
+      3) xray_service_menu ;;
+      4) clear_screen; show_xray_logs 100 || true; pause_screen ;;
+      5) clear_screen; follow_xray_logs || true; pause_screen ;;
       6)
         read -r -p "确认卸载 Xray 核心和服务并保留配置? [y/N] " answer
         if [[ "$answer" =~ ^[yY]$ ]]; then uninstall_xray_core; else yellow "已取消。"; fi
@@ -2476,40 +2455,8 @@ snell_menu() {
   done
 }
 
-manager_settings_menu() {
-  local choice answer command_state="未注册" command_style
-  while true; do
-    clear_screen
-    main_panel_header
-    if is_snell_manager_script "$SNELL_COMMAND_PATH"; then
-      command_state="已注册"
-    else
-      command_state="未注册"
-    fi
-    command_style="$(state_color "$command_state")"
-    section_title "面板设置 / 升级"
-    printf '  %b短命令%b  %b%s%b\n' "$C_GRAY" "$C_RESET" "$command_style" "$SNELL_COMMAND_PATH" "$C_RESET"
-    printf '  %b状态%b    %b%s%b\n\n' "$C_GRAY" "$C_RESET" "$command_style" "$command_state" "$C_RESET"
-    menu_option 1 "注册 / 修复 snell 短命令"
-    menu_option 2 "检查并升级管理面板" accent
-    menu_option q "返回主菜单" back
-    echo
-    read -r -p "请选择: " choice
-    case "$choice" in
-      1) register_short_command || true; pause_screen ;;
-      2)
-        read -r -p "确认从官方仓库检查并升级管理面板? [y/N] " answer
-        if [[ "$answer" =~ ^[yY]$ ]]; then update_manager || true; else yellow "已取消。"; fi
-        pause_screen
-        ;;
-      0|q|Q) return 0 ;;
-      *) yellow "无效选择。"; pause_screen ;;
-    esac
-  done
-}
-
 menu() {
-  local choice
+  local choice answer
   need_root
   [ -t 0 ] || { red "交互式面板需要在终端中运行。"; return 1; }
   if ! register_short_command true; then
@@ -2523,14 +2470,18 @@ menu() {
     section_title "主菜单"
     menu_option 1 "Snell 管理"
     menu_option 2 "Xray 管理"
-    menu_option 3 "面板设置 / 升级" accent
+    menu_option 3 "检查面板更新" accent
     menu_option q "退出" back
     echo
     read -r -p "请选择: " choice
     case "$choice" in
       1) snell_menu ;;
       2) xray_menu ;;
-      3) manager_settings_menu ;;
+      3)
+        read -r -p "确认从官方仓库检查并升级管理面板? [y/N] " answer
+        if [[ "$answer" =~ ^[yY]$ ]]; then update_manager || true; else yellow "已取消。"; fi
+        pause_screen
+        ;;
       0|q|Q) echo "已退出。"; return 0 ;;
       *) yellow "无效选择。"; pause_screen ;;
     esac
