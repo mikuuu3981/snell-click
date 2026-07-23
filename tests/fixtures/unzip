@@ -20,6 +20,20 @@ if [ "${XRAY_UNZIP_FIXTURE:-false}" = "true" ]; then
 set -euo pipefail
 case "${1:-}" in
   version) printf 'Xray %s (Xray, Penetrates Everything.) test\n' "$version" ;;
+  uuid)
+    counter=1
+    if [ -n "${XRAY_UUID_COUNTER_FILE:-}" ]; then
+      [ -s "$XRAY_UUID_COUNTER_FILE" ] && counter="$(( $(cat "$XRAY_UUID_COUNTER_FILE") + 1 ))"
+      printf '%s\n' "$counter" > "$XRAY_UUID_COUNTER_FILE"
+    fi
+    printf '00000000-0000-4000-8000-%012d\n' "$counter"
+    ;;
+  x25519)
+    printf '%s\n' \
+      'PrivateKey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' \
+      'Password (PublicKey): BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' \
+      'Hash32: CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC'
+    ;;
   run)
     [ "${XRAY_CONFIG_TEST_FAIL:-false}" = "true" ] && exit 1
     printf 'Configuration OK.\n'

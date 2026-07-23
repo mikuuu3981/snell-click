@@ -155,6 +155,11 @@ cat > "$XRAY_BIN_PATH" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}" in
   version) echo 'Xray 26.3.27 (Xray, Penetrates Everything.) test' ;;
+  uuid) echo '00000000-0000-4000-8000-000000000001' ;;
+  x25519)
+    echo 'PrivateKey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+    echo 'Password (PublicKey): BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'
+    ;;
   run) exit 0 ;;
 esac
 EOF
@@ -163,12 +168,25 @@ printf '{}\n' > "$XRAY_CONFIG_PATH"
 printf '[Unit]\nDescription=Xray test service\n' > "$XRAY_SERVICE_PATH"
 
 output="$(run_menu 2 q q)"
-assert_contains "$output" "1) 查看详细状态"
+assert_contains "$output" "1) 入站管理"
 assert_contains "$output" "3) 服务控制"
 assert_contains "$output" "4) 查看最近日志"
 assert_contains "$output" "5) 实时跟踪日志"
 assert_not_contains "$output" "检查配置"
 assert_not_contains "$output" "5) 日志"
+
+output="$(run_menu 2 1 q q q)"
+assert_contains "$output" "托管入站"
+assert_contains "$output" "暂无托管入站"
+assert_contains "$output" "添加 VLESS Reality 入站"
+
+output="$(run_menu 2 1 a www.example.com '' '' y '' q q q)"
+assert_contains "$output" "REALITY SNI"
+assert_contains "$output" "监听端口 [443]"
+assert_contains "$output" "入站 ID: 001 · 端口: 443"
+assert_contains "$output" "vless://00000000-0000-4000-8000-000000000001@203.0.113.10:443"
+[ "$(jq -r '.inbounds[0].port' "$XRAY_CONFIG_PATH")" = "443" ]
+[ "$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' "$XRAY_CONFIG_PATH")" = "www.example.com" ]
 
 output="$(run_menu 2 4 '' q q)"
 assert_contains "$output" "snell test log"

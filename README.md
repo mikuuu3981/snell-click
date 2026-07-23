@@ -63,6 +63,8 @@ v5 默认采用官方向导一致的 IPv4 监听，v6 默认启用 IPv4/IPv6 双
 - 配置启动失败时自动回滚
 - 服务端更新失败时自动恢复旧二进制
 - 安装、更新、校验、启停、日志和卸载 Xray 核心
+- 创建和管理多个 VLESS TCP REALITY Vision 入站及用户
+- 生成 VLESS 分享链接和 Mihomo / Clash Meta 客户端配置
 - Xray 更新前使用新核心校验现有配置，启动失败时恢复旧核心和 Geo 数据
 - 打开面板时自动注册或修复短命令，顶层菜单可直接检查并升级管理脚本
 
@@ -97,9 +99,9 @@ sudo snell v6 update v6.0.0rc
 
 其他配置命令 `set-ipv6`、`set-dns`、`set-dns-preference`、`set-egress`、`logs`、`backup` 和 `restore` 同样接受版本前缀。运行 `snell help` 查看完整列表。
 
-## Xray 核心管理
+## Xray 管理
 
-Xray 当前覆盖核心生命周期管理，为后续协议和节点配置模块提供稳定基础：
+Xray 支持核心生命周期管理，以及多个 VLESS TCP REALITY Vision 入站和用户。交互面板从“Xray 管理 → 入站管理”创建入站；创建时必须输入 SNI。端口留空时优先使用 `443`，如果 `443` 已被系统服务或现有托管入站占用，则使用 `8443`；两者都被占用时必须输入其他端口。官方 Xray 提示非 `443` REALITY 端口会增加服务器 IP 被封锁的风险，因此使用 `8443` 或其他端口时面板会明确警告，但不会阻止用户继续。
 
 ```bash
 sudo snell xray status
@@ -109,10 +111,26 @@ sudo snell xray update
 sudo snell xray test
 sudo snell xray restart
 sudo snell xray logs 100
+sudo snell xray inbounds
+sudo snell xray reality-add www.example.com
+sudo snell xray reality-add www.example.com 8443 user1
+sudo snell xray reality-edit 1 cdn.example.com 9443
+sudo snell xray reality-client 1 proxy.example.com
+sudo snell xray user-add 1 alice
+sudo snell xray user-delete 1 00000000-0000-4000-8000-000000000001
+sudo snell xray reality-delete 1
 sudo snell xray uninstall
 ```
 
-省略版本时通过 XTLS 官方 GitHub Release API 获取最新稳定版；也可以使用 `snell xray install v26.3.27` 或 `snell xray update v26.3.27` 固定版本。支持的 Linux 架构为 amd64、arm64 和 i386。
+每个入站使用独立的 REALITY X25519 密钥和 shortId，用户使用独立 UUID，并固定为 `xtls-rprx-vision` 流控。客户端页输出标准 VLESS URI 和 Mihomo / Clash Meta YAML；服务器地址可以使用自动检测到的公网 IPv4，也可以主动输入域名或 IP。SNI 应当是支持 TLS 1.3 的目标站点证书域名，不能输入 URL、路径或端口。
+
+Xray `v26.7.11` 起，REALITY 服务端默认要求客户端支持 `26.3.27+` 握手。面板保留官方默认，不会自动设置 `minClientVer: 0.0.0` 降低防护；使用 Mihomo 时应选择已经适配该握手版本的构建，否则可能出现 authentication failed。客户端配置页会显示对应提醒。
+
+面板只管理标签以 `snell-managed-vless-reality-` 开头的入站。修改配置时使用 `jq` 保留其他入站、出站、日志、DNS 和路由字段，不会删除用户手写内容。为避免破坏 JSONC 注释或非标准结构，自动管理只接受根对象中 `inbounds`、`outbounds` 为数组的严格 JSON；不符合条件时会拒绝修改，现有 Xray 服务仍可继续手动管理。
+
+每次添加、修改、删除入站或用户时，脚本会先生成候选配置并执行 Xray 配置测试，然后将原配置以 `600` 权限备份到 `/usr/local/etc/xray/backups/`，再原子替换 `config.json`。运行中的服务会重启并检查状态；新配置启动失败时自动恢复旧配置。经由该 Xray 入站的 SSH 可能在重启时暂时断开，SSH 断线本身不代表配置操作失败，重新连接后可运行 `snell xray status` 和 `snell xray inbounds` 核验。
+
+省略版本时通过 XTLS 官方 GitHub Release API 获取最新稳定版；也可以使用 `snell xray install v26.7.11` 或 `snell xray update v26.7.11` 固定版本。支持的 Linux 架构为 amd64、arm64 和 i386。
 
 默认使用 Xray 官方标准路径：
 
@@ -120,6 +138,7 @@ sudo snell xray uninstall
 | --- | --- |
 | 核心 | `/usr/local/bin/xray` |
 | 配置 | `/usr/local/etc/xray/config.json` |
+| 配置备份 | `/usr/local/etc/xray/backups/` |
 | Geo 数据 | `/usr/local/share/xray/` |
 | 日志 | `/var/log/xray/` |
 | 服务 | `/etc/systemd/system/xray.service` |
@@ -176,7 +195,7 @@ sudo snell migrate v6
 
 ## 配置与安全
 
-Snell 和面板创建的 Xray 服务都使用 `nobody:nogroup` 运行。配置文件归属为 `root:nogroup`、权限为 `640`；Snell 备份目录和备份文件分别使用 `700` 和 `600`。每次修改 Snell 配置前自动备份，重启失败则恢复旧配置。
+Snell 和面板创建的 Xray 服务都使用 `nobody:nogroup` 运行。配置文件归属为 `root:nogroup`、权限为 `640`；Snell 和 Xray 的备份目录及文件分别使用 `700` 和 `600`。每次修改配置前自动备份，重启失败则恢复旧配置。
 
 可以使用环境变量指定初始实例参数：
 

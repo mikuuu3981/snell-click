@@ -54,6 +54,8 @@ XRAY_ASSET_DIR="${XRAY_ASSET_DIR:-/usr/local/share/xray}"
 XRAY_LOG_DIR="${XRAY_LOG_DIR:-/var/log/xray}"
 XRAY_SERVICE_PATH="${XRAY_SERVICE_PATH:-${SYSTEMD_DIR}/xray.service}"
 XRAY_SERVICE_NAME="${XRAY_SERVICE_NAME:-xray}"
+XRAY_BACKUP_DIR="${XRAY_BACKUP_DIR:-${XRAY_CONFIG_DIR}/backups}"
+XRAY_MANAGED_TAG_PREFIX="snell-managed-vless-reality-"
 
 use_instance() {
   local protocol="${1:-}"
@@ -388,6 +390,8 @@ xray_ensure_dependencies() {
   local missing=()
   command -v unzip >/dev/null 2>&1 || missing+=("unzip")
   command -v sha256sum >/dev/null 2>&1 || missing+=("coreutils")
+  command -v jq >/dev/null 2>&1 || missing+=("jq")
+  command -v ss >/dev/null 2>&1 || missing+=("iproute2")
   if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
     missing+=("curl")
   fi
@@ -458,6 +462,525 @@ xray_config_is_valid_with() {
 
 xray_config_is_valid() {
   xray_config_is_valid_with "$XRAY_BIN_PATH" "$XRAY_CONFIG_PATH"
+}
+
+validate_xray_sni() {
+  local value="${1,,}"
+  [ "${#value}" -le 253 ] &&
+    [[ "$value" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]
+}
+
+validate_xray_user_name() {
+  [ -n "${1:-}" ] && [ "${#1}" -le 64 ] && [[ "$1" =~ ^[0-9A-Za-z._@-]+$ ]]
+}
+
+warn_xray_reality_choices() {
+  local sni="${1,,}" port="$2"
+  [ "$port" = "443" ] || warn "官方 Xray 提示：REALITY 使用非 443 端口会增加服务器 IP 被封锁的风险。"
+  case "$sni" in
+    *.cn|*.ru|*.ir|*apple*|*icloud*|*microsoft*)
+      warn "官方 Xray 不建议将 ${sni} 用作 REALITY 目标，请确认你了解封锁风险。"
+      ;;
+  esac
+}
+
+validate_xray_server_address() {
+  local value="${1:-}"
+  [ -n "$value" ] && [ "${#value}" -le 253 ] &&
+    [[ "$value" =~ ^[0-9A-Za-z.-]+$|^[0-9A-Fa-f:]+$ ]]
+}
+
+xray_config_supports_management() {
+  command -v jq >/dev/null 2>&1 && [ -r "$XRAY_CONFIG_PATH" ] &&
+    jq -e '
+      type == "object" and
+      ((.inbounds // []) | type == "array") and
+      ((.outbounds // []) | type == "array")
+    ' "$XRAY_CONFIG_PATH" >/dev/null 2>&1
+}
+
+normalize_xray_inbound_id() {
+  local value="${1:-}"
+  [[ "$value" =~ ^[0-9]{1,3}$ ]] || return 1
+  [ "$((10#$value))" -ge 1 ] && [ "$((10#$value))" -le 999 ] || return 1
+  printf '%03d\n' "$((10#$value))"
+}
+
+xray_managed_tag() {
+  local id
+  id="$(normalize_xray_inbound_id "${1:-}")" || return 1
+  printf '%s%s\n' "$XRAY_MANAGED_TAG_PREFIX" "$id"
+}
+
+xray_managed_inbound_ids() {
+  xray_config_supports_management || return 1
+  jq -r --arg prefix "$XRAY_MANAGED_TAG_PREFIX" '
+    (.inbounds // [])[]
+    | select(.protocol == "vless")
+    | .tag // ""
+    | select(startswith($prefix))
+    | ltrimstr($prefix)
+    | select(test("^[0-9]{3}$"))
+  ' "$XRAY_CONFIG_PATH" | sort -n
+}
+
+xray_managed_inbound_count() {
+  local count
+  if ! count="$(xray_managed_inbound_ids 2>/dev/null | wc -l)"; then
+    echo 0
+  else
+    printf '%s\n' "${count//[[:space:]]/}"
+  fi
+}
+
+xray_next_inbound_id() {
+  local id max=0
+  while IFS= read -r id; do
+    [[ "$id" =~ ^[0-9]{3}$ ]] || continue
+    [ "$((10#$id))" -gt "$max" ] && max="$((10#$id))"
+  done < <(xray_managed_inbound_ids 2>/dev/null || true)
+  [ "$max" -lt 999 ] || { red "托管入站数量已达到上限。" >&2; return 1; }
+  printf '%03d\n' "$((max + 1))"
+}
+
+xray_managed_inbound_exists() {
+  local tag
+  tag="$(xray_managed_tag "${1:-}")" || return 1
+  jq -e --arg tag "$tag" 'any((.inbounds // [])[]; .tag == $tag)' \
+    "$XRAY_CONFIG_PATH" >/dev/null 2>&1
+}
+
+xray_managed_inbound_json() {
+  local tag
+  tag="$(xray_managed_tag "${1:-}")" || return 1
+  jq -c --arg tag "$tag" 'first((.inbounds // [])[] | select(.tag == $tag))' \
+    "$XRAY_CONFIG_PATH"
+}
+
+xray_managed_inbound_field() {
+  local id="$1" filter="$2" inbound
+  inbound="$(xray_managed_inbound_json "$id")" || return 1
+  jq -r "$filter" <<<"$inbound"
+}
+
+xray_managed_port_in_use() {
+  local port="$1" excluded_id="${2:-}" excluded_tag=""
+  [ -n "$excluded_id" ] && excluded_tag="$(xray_managed_tag "$excluded_id")"
+  jq -e --argjson port "$port" --arg excluded "$excluded_tag" '
+    any((.inbounds // [])[]; (.port == $port) and (.tag // "") != $excluded)
+  ' "$XRAY_CONFIG_PATH" >/dev/null 2>&1
+}
+
+xray_reality_port_available() {
+  local port="$1" excluded_id="${2:-}" current_port="" status
+  validate_port "$port" || return 1
+  if [ -n "$excluded_id" ] && xray_managed_inbound_exists "$excluded_id"; then
+    current_port="$(xray_managed_inbound_field "$excluded_id" '.port')"
+    [ "$port" = "$current_port" ] && return 0
+  fi
+  xray_managed_port_in_use "$port" "$excluded_id" && return 1
+  if port_availability "$port"; then
+    return 0
+  else
+    status=$?
+  fi
+  return "$status"
+}
+
+xray_default_reality_port() {
+  local port status
+  for port in 443 8443; do
+    if xray_reality_port_available "$port"; then
+      printf '%s\n' "$port"
+      return 0
+    else
+      status=$?
+    fi
+    [ "$status" -gt 1 ] && return "$status"
+  done
+  return 1
+}
+
+xray_generate_uuid() {
+  local value
+  value="$("$XRAY_BIN_PATH" uuid 2>/dev/null | tail -n 1)"
+  [[ "$value" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]] || {
+    red "Xray 未能生成有效 UUID。" >&2
+    return 1
+  }
+  printf '%s\n' "${value,,}"
+}
+
+xray_generate_reality_keypair() {
+  local output private_key public_key
+  output="$("$XRAY_BIN_PATH" x25519 2>&1)" || {
+    red "Xray 未能生成 REALITY X25519 密钥。" >&2
+    return 1
+  }
+  private_key="$(printf '%s\n' "$output" | sed -nE 's/^(PrivateKey|Private key):[[:space:]]*//p' | head -n 1)"
+  public_key="$(printf '%s\n' "$output" | sed -nE 's/^(Password \(PublicKey\)|PublicKey|Public key):[[:space:]]*//p' | head -n 1)"
+  if ! [[ "$private_key" =~ ^[0-9A-Za-z_-]{43}$ ]] ||
+     ! [[ "$public_key" =~ ^[0-9A-Za-z_-]{43}$ ]]; then
+    red "无法解析 Xray 生成的 REALITY 密钥。" >&2
+    return 1
+  fi
+  printf '%s\n%s\n' "$private_key" "$public_key"
+}
+
+xray_public_key_from_private() {
+  local private_key="$1" output public_key
+  output="$("$XRAY_BIN_PATH" x25519 -i "$private_key" 2>&1)" || return 1
+  public_key="$(printf '%s\n' "$output" | sed -nE 's/^(Password \(PublicKey\)|PublicKey|Public key):[[:space:]]*//p' | head -n 1)"
+  [[ "$public_key" =~ ^[0-9A-Za-z_-]{43}$ ]] || return 1
+  printf '%s\n' "$public_key"
+}
+
+xray_generate_short_id() {
+  local value
+  if command -v openssl >/dev/null 2>&1; then
+    value="$(openssl rand -hex 8 2>/dev/null)"
+  else
+    value="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')"
+  fi
+  [[ "$value" =~ ^[0-9a-f]{16}$ ]] || { red "无法生成 REALITY shortId。" >&2; return 1; }
+  printf '%s\n' "$value"
+}
+
+apply_xray_config_candidate() {
+  local candidate="$1" action_label="$2" backup temp validation_output was_active=false
+  need_root
+  xray_is_installed || { red "Xray 尚未完整安装。"; return 1; }
+  if ! validation_output="$("$XRAY_BIN_PATH" run -test -config "$candidate" 2>&1)"; then
+    red "候选 Xray 配置校验失败，未修改现有配置。"
+    printf '%s\n' "$validation_output" >&2
+    return 1
+  fi
+  mkdir -p "$XRAY_BACKUP_DIR" || { red "无法创建 Xray 配置备份目录。"; return 1; }
+  chown root:root "$XRAY_BACKUP_DIR" || return 1
+  chmod 700 "$XRAY_BACKUP_DIR" || return 1
+  backup="$(mktemp "${XRAY_BACKUP_DIR}/config-$(date +%Y%m%d-%H%M%S)-XXXXXX.json")" || return 1
+  if ! install -o root -g root -m 600 "$XRAY_CONFIG_PATH" "$backup"; then
+    rm -f "$backup"
+    red "Xray 配置备份失败。"
+    return 1
+  fi
+  temp="$(mktemp "${XRAY_CONFIG_PATH}.XXXXXX")" || return 1
+  if ! install -o root -g nogroup -m 640 "$candidate" "$temp"; then
+    rm -f "$temp"
+    red "Xray 候选配置写入失败。"
+    return 1
+  fi
+  xray_service_is_active && was_active=true
+  if ! mv -f "$temp" "$XRAY_CONFIG_PATH"; then
+    rm -f "$temp"
+    red "Xray 配置替换失败。"
+    return 1
+  fi
+  if [ "$was_active" = "true" ]; then
+    warn "应用配置会重启 Xray；经由该核心的现有连接可能暂时中断。"
+    if ! systemctl restart "$XRAY_SERVICE_NAME" || ! sleep 1 || ! xray_service_is_active; then
+      install -o root -g nogroup -m 640 "$backup" "$XRAY_CONFIG_PATH" 2>/dev/null || true
+      systemctl restart "$XRAY_SERVICE_NAME" 2>/dev/null || true
+      red "Xray 服务未能使用新配置启动，已恢复原配置。"
+      return 1
+    fi
+  fi
+  success "${action_label}；配置备份: ${backup}"
+}
+
+xray_prepare_config_management() {
+  need_root
+  xray_is_installed || { red "请先安装 Xray 核心。"; return 1; }
+  xray_ensure_dependencies || return 1
+  if ! xray_config_supports_management; then
+    red "当前 config.json 不是可安全管理的标准 JSON，已拒绝自动修改。"
+    warn "请先确保根对象中的 inbounds 和 outbounds 为数组；JSONC 注释配置可继续手动使用。"
+    return 1
+  fi
+}
+
+add_xray_reality_inbound() {
+  local sni="${1,,}" requested_port="${2:-}" user_name="${3:-user1}"
+  local choices_warned="${4:-false}" port id tag uuid short_id candidate status
+  local -a keypair=()
+  xray_prepare_config_management || return 1
+  validate_xray_sni "$sni" || { red "SNI 必须是有效域名，不能包含协议、路径或端口。"; return 1; }
+  validate_xray_user_name "$user_name" || { red "用户名称只能包含字母、数字、点、下划线、@ 和连字符。"; return 1; }
+  if [ -n "$requested_port" ]; then
+    validate_port "$requested_port" || { red "端口必须是 1-65535 的整数。"; return 1; }
+    port="$requested_port"
+  elif ! port="$(xray_default_reality_port)"; then
+    status=$?
+    if [ "$status" -gt 1 ]; then
+      red "无法检测 443 和 8443 端口是否可用。"
+    else
+      red "默认端口 443 和 8443 均已占用，请指定其他端口。"
+    fi
+    return 1
+  fi
+  if ! xray_reality_port_available "$port"; then
+    status=$?
+    if [ "$status" -gt 1 ]; then
+      red "无法检测端口 ${port} 是否可用。"
+    else
+      red "端口 ${port} 已被占用。"
+    fi
+    return 1
+  fi
+  [ "$choices_warned" = "true" ] || warn_xray_reality_choices "$sni" "$port"
+  id="$(xray_next_inbound_id)" || return 1
+  tag="$(xray_managed_tag "$id")" || return 1
+  uuid="$(xray_generate_uuid)" || return 1
+  mapfile -t keypair < <(xray_generate_reality_keypair)
+  [ "${#keypair[@]}" -eq 2 ] || return 1
+  short_id="$(xray_generate_short_id)" || return 1
+  candidate="$(mktemp "${XRAY_CONFIG_DIR}/.candidate.XXXXXX.json")" || return 1
+  if ! jq \
+      --arg tag "$tag" \
+      --argjson port "$port" \
+      --arg sni "$sni" \
+      --arg target "${sni}:443" \
+      --arg uuid "$uuid" \
+      --arg user "$user_name" \
+      --arg private_key "${keypair[0]}" \
+      --arg short_id "$short_id" '
+        .inbounds = ((.inbounds // []) + [{
+          tag: $tag,
+          listen: "0.0.0.0",
+          port: $port,
+          protocol: "vless",
+          settings: {
+            clients: [{id: $uuid, flow: "xtls-rprx-vision", email: $user}],
+            decryption: "none"
+          },
+          streamSettings: {
+            network: "tcp",
+            security: "reality",
+            realitySettings: {
+              show: false,
+              target: $target,
+              xver: 0,
+              serverNames: [$sni],
+              privateKey: $private_key,
+              shortIds: [$short_id]
+            }
+          },
+          sniffing: {
+            enabled: true,
+            destOverride: ["http", "tls", "quic"],
+            routeOnly: true
+          }
+        }])
+        | if ((.outbounds // []) | length) == 0 then
+            .outbounds = [{tag: "snell-managed-direct", protocol: "freedom"}]
+          else . end
+      ' "$XRAY_CONFIG_PATH" > "$candidate"; then
+    rm -f "$candidate"
+    red "生成 VLESS REALITY 候选配置失败。"
+    return 1
+  fi
+  if ! apply_xray_config_candidate "$candidate" "VLESS REALITY 入站 ${id} 已创建"; then
+    rm -f "$candidate"
+    return 1
+  fi
+  rm -f "$candidate"
+  success "入站 ID: ${id} · 端口: ${port} · SNI: ${sni} · 用户: ${user_name}"
+}
+
+edit_xray_reality_inbound() {
+  local raw_id="$1" sni="${2,,}" port="$3" choices_warned="${4:-false}" id tag candidate status
+  xray_prepare_config_management || return 1
+  id="$(normalize_xray_inbound_id "$raw_id")" || { red "无效入站 ID: ${raw_id}"; return 1; }
+  xray_managed_inbound_exists "$id" || { red "未找到托管入站 ${id}。"; return 1; }
+  validate_xray_sni "$sni" || { red "SNI 必须是有效域名，不能包含协议、路径或端口。"; return 1; }
+  validate_port "$port" || { red "端口必须是 1-65535 的整数。"; return 1; }
+  if ! xray_reality_port_available "$port" "$id"; then
+    status=$?
+    if [ "$status" -gt 1 ]; then red "无法检测端口 ${port} 是否可用。"; else red "端口 ${port} 已被占用。"; fi
+    return 1
+  fi
+  [ "$choices_warned" = "true" ] || warn_xray_reality_choices "$sni" "$port"
+  tag="$(xray_managed_tag "$id")"
+  candidate="$(mktemp "${XRAY_CONFIG_DIR}/.candidate.XXXXXX.json")" || return 1
+  if ! jq --arg tag "$tag" --arg sni "$sni" --arg target "${sni}:443" --argjson port "$port" '
+      .inbounds |= map(
+        if .tag == $tag then
+          .port = $port
+          | .streamSettings.realitySettings.target = $target
+          | .streamSettings.realitySettings.serverNames = [$sni]
+        else . end
+      )
+    ' "$XRAY_CONFIG_PATH" > "$candidate"; then
+    rm -f "$candidate"
+    red "生成入站修改候选配置失败。"
+    return 1
+  fi
+  if ! apply_xray_config_candidate "$candidate" "VLESS REALITY 入站 ${id} 已更新"; then
+    rm -f "$candidate"
+    return 1
+  fi
+  rm -f "$candidate"
+}
+
+delete_xray_reality_inbound() {
+  local raw_id="$1" id tag candidate
+  xray_prepare_config_management || return 1
+  id="$(normalize_xray_inbound_id "$raw_id")" || { red "无效入站 ID: ${raw_id}"; return 1; }
+  xray_managed_inbound_exists "$id" || { red "未找到托管入站 ${id}。"; return 1; }
+  tag="$(xray_managed_tag "$id")"
+  candidate="$(mktemp "${XRAY_CONFIG_DIR}/.candidate.XXXXXX.json")" || return 1
+  if ! jq --arg tag "$tag" '.inbounds |= map(select(.tag != $tag))' \
+      "$XRAY_CONFIG_PATH" > "$candidate"; then
+    rm -f "$candidate"
+    red "生成入站删除候选配置失败。"
+    return 1
+  fi
+  if ! apply_xray_config_candidate "$candidate" "VLESS REALITY 入站 ${id} 已删除"; then
+    rm -f "$candidate"
+    return 1
+  fi
+  rm -f "$candidate"
+}
+
+add_xray_reality_user() {
+  local raw_id="$1" user_name="$2" id tag uuid candidate
+  xray_prepare_config_management || return 1
+  id="$(normalize_xray_inbound_id "$raw_id")" || { red "无效入站 ID: ${raw_id}"; return 1; }
+  xray_managed_inbound_exists "$id" || { red "未找到托管入站 ${id}。"; return 1; }
+  validate_xray_user_name "$user_name" || { red "用户名称只能包含字母、数字、点、下划线、@ 和连字符。"; return 1; }
+  tag="$(xray_managed_tag "$id")"
+  if jq -e --arg tag "$tag" --arg user "$user_name" '
+      any((.inbounds // [])[] | select(.tag == $tag) | .settings.clients[]; (.email // "") == $user)
+    ' "$XRAY_CONFIG_PATH" >/dev/null; then
+    red "入站 ${id} 已存在用户 ${user_name}。"
+    return 1
+  fi
+  uuid="$(xray_generate_uuid)" || return 1
+  candidate="$(mktemp "${XRAY_CONFIG_DIR}/.candidate.XXXXXX.json")" || return 1
+  if ! jq --arg tag "$tag" --arg uuid "$uuid" --arg user "$user_name" '
+      .inbounds |= map(
+        if .tag == $tag then
+          .settings.clients += [{id: $uuid, flow: "xtls-rprx-vision", email: $user}]
+        else . end
+      )
+    ' "$XRAY_CONFIG_PATH" > "$candidate"; then
+    rm -f "$candidate"
+    red "生成用户候选配置失败。"
+    return 1
+  fi
+  if ! apply_xray_config_candidate "$candidate" "用户 ${user_name} 已添加到入站 ${id}"; then
+    rm -f "$candidate"
+    return 1
+  fi
+  rm -f "$candidate"
+  success "UUID: ${uuid}"
+}
+
+delete_xray_reality_user() {
+  local raw_id="$1" uuid="$2" id tag candidate count
+  xray_prepare_config_management || return 1
+  id="$(normalize_xray_inbound_id "$raw_id")" || { red "无效入站 ID: ${raw_id}"; return 1; }
+  xray_managed_inbound_exists "$id" || { red "未找到托管入站 ${id}。"; return 1; }
+  tag="$(xray_managed_tag "$id")"
+  count="$(xray_managed_inbound_field "$id" '.settings.clients | length')"
+  [ "$count" -gt 1 ] || { red "不能删除入站的最后一个用户；请直接删除该入站。"; return 1; }
+  if ! jq -e --arg tag "$tag" --arg uuid "$uuid" '
+      any((.inbounds // [])[] | select(.tag == $tag) | .settings.clients[]; .id == $uuid)
+    ' "$XRAY_CONFIG_PATH" >/dev/null; then
+    red "入站 ${id} 中不存在该用户。"
+    return 1
+  fi
+  candidate="$(mktemp "${XRAY_CONFIG_DIR}/.candidate.XXXXXX.json")" || return 1
+  if ! jq --arg tag "$tag" --arg uuid "$uuid" '
+      .inbounds |= map(
+        if .tag == $tag then .settings.clients |= map(select(.id != $uuid)) else . end
+      )
+    ' "$XRAY_CONFIG_PATH" > "$candidate"; then
+    rm -f "$candidate"
+    red "生成用户删除候选配置失败。"
+    return 1
+  fi
+  if ! apply_xray_config_candidate "$candidate" "用户已从入站 ${id} 删除"; then
+    rm -f "$candidate"
+    return 1
+  fi
+  rm -f "$candidate"
+}
+
+list_xray_managed_inbounds() {
+  local id inbound port sni users
+  xray_prepare_config_management || return 1
+  section_title "Xray 托管入站"
+  printf '%b  %-5s %-9s %-15s %-7s %s%b\n' "$C_GRAY" "ID" "协议" "传输" "端口" "用户" "$C_RESET"
+  while IFS= read -r id; do
+    inbound="$(xray_managed_inbound_json "$id")"
+    port="$(jq -r '.port' <<<"$inbound")"
+    sni="$(jq -r '.streamSettings.realitySettings.serverNames[0]' <<<"$inbound")"
+    users="$(jq -r '.settings.clients | length' <<<"$inbound")"
+    printf '  %-5s %-9s %-15s %-7s %s · %s\n' "$id" "VLESS" "REALITY/TCP" "$port" "$users" "$sni"
+  done < <(xray_managed_inbound_ids)
+}
+
+show_xray_reality_inbound() {
+  local raw_id="$1" id inbound
+  id="$(normalize_xray_inbound_id "$raw_id")" || return 1
+  xray_managed_inbound_exists "$id" || return 1
+  inbound="$(xray_managed_inbound_json "$id")"
+  section_title "VLESS REALITY 入站 ${id}"
+  detail_row "协议" "VLESS"
+  detail_row "传输" "TCP + REALITY"
+  detail_row "流控" "xtls-rprx-vision"
+  detail_row "端口" "$(jq -r '.port' <<<"$inbound")"
+  detail_row "SNI" "$(jq -r '.streamSettings.realitySettings.serverNames[0]' <<<"$inbound")"
+  detail_row "目标" "$(jq -r '.streamSettings.realitySettings.target // .streamSettings.realitySettings.dest' <<<"$inbound")"
+  detail_row "用户" "$(jq -r '.settings.clients | length' <<<"$inbound")"
+}
+
+xray_url_encode() {
+  jq -sRr @uri <<<"${1:-}" | sed 's/%0A$//'
+}
+
+show_xray_reality_clients() {
+  local raw_id="$1" address="${2:-}" id inbound port sni private_key public_key short_id uri_address
+  local uuid user label encoded_label
+  xray_prepare_config_management || return 1
+  id="$(normalize_xray_inbound_id "$raw_id")" || { red "无效入站 ID: ${raw_id}"; return 1; }
+  xray_managed_inbound_exists "$id" || { red "未找到托管入站 ${id}。"; return 1; }
+  if [ -z "$address" ]; then address="$(public_ip 4)"; fi
+  validate_xray_server_address "$address" || { red "请提供有效的服务器域名或 IP 地址。"; return 1; }
+  inbound="$(xray_managed_inbound_json "$id")"
+  port="$(jq -r '.port' <<<"$inbound")"
+  sni="$(jq -r '.streamSettings.realitySettings.serverNames[0]' <<<"$inbound")"
+  private_key="$(jq -r '.streamSettings.realitySettings.privateKey' <<<"$inbound")"
+  short_id="$(jq -r '.streamSettings.realitySettings.shortIds[0]' <<<"$inbound")"
+  public_key="$(xray_public_key_from_private "$private_key")" || { red "无法从 REALITY 私钥推导公钥。"; return 1; }
+  uri_address="$address"
+  [[ "$address" == *:* ]] && uri_address="[${address}]"
+  warn "Mihomo 必须支持 Xray 26.3.27+ REALITY 握手；旧版本可能认证失败。"
+  while IFS=$'\t' read -r uuid user; do
+    [ -n "$uuid" ] || continue
+    [ -n "$user" ] || user="user"
+    label="Reality-${id}-${user}"
+    encoded_label="$(xray_url_encode "$label")"
+    section_title "$label"
+    printf '%s\n\n' "vless://${uuid}@${uri_address}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#${encoded_label}"
+    printf '%s\n' "mihomo / Clash Meta"
+    printf '%s\n' "- name: ${label}"
+    printf '%s\n' "  type: vless"
+    printf '%s\n' "  server: ${address}"
+    printf '%s\n' "  port: ${port}"
+    printf '%s\n' "  uuid: ${uuid}"
+    printf '%s\n' "  network: tcp"
+    printf '%s\n' "  tls: true"
+    printf '%s\n' "  udp: true"
+    printf '%s\n' "  flow: xtls-rprx-vision"
+    printf '%s\n' "  client-fingerprint: chrome"
+    printf '%s\n' "  servername: ${sni}"
+    printf '%s\n' "  reality-opts:"
+    printf '%s\n' "    public-key: ${public_key}"
+    printf '%s\n\n' "    short-id: ${short_id}"
+  done < <(jq -r '.settings.clients[] | [.id, (.email // "user")] | @tsv' <<<"$inbound")
+  warn "请在云服务商安全组及本机防火墙中放行 TCP ${port}。"
 }
 
 write_xray_service() {
@@ -644,7 +1167,7 @@ install_xray_core() {
   else
     success "Xray ${version} 安装成功。"
     [ -s "$XRAY_CONFIG_PATH" ] && [ "$(tr -d '[:space:]' < "$XRAY_CONFIG_PATH")" = "{}" ] &&
-      warn "当前是空配置；请编辑 ${XRAY_CONFIG_PATH} 后再添加代理入站。"
+      warn "当前是空配置；请从 Xray 管理 → 入站管理创建代理入站。"
   fi
 }
 
@@ -2284,6 +2807,192 @@ prompt_xray_install() {
   fi
 }
 
+prompt_add_xray_reality_inbound() {
+  local sni port user_name answer default_port="" id
+  xray_prepare_config_management || return 1
+  default_port="$(xray_default_reality_port 2>/dev/null || true)"
+  while true; do
+    read -r -p "REALITY SNI（必填，如 www.example.com）: " sni
+    sni="${sni,,}"
+    validate_xray_sni "$sni" && break
+    red "请输入有效域名，不要包含 https://、路径或端口。"
+  done
+  while true; do
+    if [ -n "$default_port" ]; then
+      read -r -p "监听端口 [${default_port}]: " port
+      port="${port:-$default_port}"
+    else
+      read -r -p "监听端口 [443 和 8443 均被占用]: " port
+    fi
+    if validate_port "$port" && xray_reality_port_available "$port"; then break; fi
+    red "端口无效、已占用或无法确认可用，请重新输入。"
+  done
+  read -r -p "首个用户名称 [user1]: " user_name
+  user_name="${user_name:-user1}"
+  validate_xray_user_name "$user_name" || { red "用户名称格式无效。"; return 1; }
+  echo
+  detail_row "协议" "VLESS + TCP + REALITY + Vision"
+  detail_row "SNI" "$sni"
+  detail_row "目标" "${sni}:443"
+  detail_row "端口" "$port"
+  detail_row "用户" "$user_name"
+  warn_xray_reality_choices "$sni" "$port"
+  read -r -p "确认创建入站? [y/N] " answer
+  if ! [[ "$answer" =~ ^[yY]$ ]]; then yellow "已取消。"; return 0; fi
+  add_xray_reality_inbound "$sni" "$port" "$user_name" true || return 1
+  id="$(xray_managed_inbound_ids | tail -n 1)"
+  if [ -n "$id" ]; then show_xray_reality_clients "$id" || true; fi
+}
+
+prompt_edit_xray_reality_inbound() {
+  local id="$1" inbound current_sni current_port sni port answer
+  inbound="$(xray_managed_inbound_json "$id")" || return 1
+  current_sni="$(jq -r '.streamSettings.realitySettings.serverNames[0]' <<<"$inbound")"
+  current_port="$(jq -r '.port' <<<"$inbound")"
+  read -r -p "REALITY SNI [${current_sni}]: " sni
+  sni="${sni:-$current_sni}"
+  sni="${sni,,}"
+  validate_xray_sni "$sni" || { red "SNI 必须是有效域名。"; return 1; }
+  read -r -p "监听端口 [${current_port}]: " port
+  port="${port:-$current_port}"
+  validate_port "$port" || { red "端口必须是 1-65535 的整数。"; return 1; }
+  if [ "$sni" = "$current_sni" ] && [ "$port" = "$current_port" ]; then
+    yellow "配置没有变化。"
+    return 0
+  fi
+  warn_xray_reality_choices "$sni" "$port"
+  read -r -p "确认更新入站 ${id}? [y/N] " answer
+  if [[ "$answer" =~ ^[yY]$ ]]; then
+    edit_xray_reality_inbound "$id" "$sni" "$port" true
+  else
+    yellow "已取消。"
+  fi
+}
+
+xray_reality_users_menu() {
+  local id="$1" choice user_name answer selected uuid index
+  local -a records=()
+  while xray_managed_inbound_exists "$id"; do
+    clear_screen
+    xray_panel_header
+    show_xray_reality_inbound "$id"
+    section_title "用户管理"
+    mapfile -t records < <(xray_managed_inbound_field "$id" '.settings.clients[] | [.id, (.email // "user")] | @tsv')
+    for index in "${!records[@]}"; do
+      uuid="${records[$index]%%$'\t'*}"
+      user_name="${records[$index]#*$'\t'}"
+      printf '  %d) %-20s %s…\n' "$((index + 1))" "$user_name" "${uuid:0:8}"
+    done
+    echo
+    menu_option a "添加用户" accent
+    menu_option d "删除用户" danger
+    menu_option q "返回入站" back
+    echo
+    read -r -p "请选择: " choice
+    case "$choice" in
+      a|A)
+        read -r -p "用户名称 [user$(( ${#records[@]} + 1 ))]: " user_name
+        user_name="${user_name:-user$(( ${#records[@]} + 1 ))}"
+        add_xray_reality_user "$id" "$user_name" || true
+        pause_screen
+        ;;
+      d|D)
+        read -r -p "要删除的用户编号: " selected
+        if ! [[ "$selected" =~ ^[1-9][0-9]*$ ]] || [ "$selected" -gt "${#records[@]}" ]; then
+          yellow "无效用户编号。"; pause_screen; continue
+        fi
+        uuid="${records[$((selected - 1))]%%$'\t'*}"
+        user_name="${records[$((selected - 1))]#*$'\t'}"
+        read -r -p "确认删除用户 ${user_name}? [y/N] " answer
+        if [[ "$answer" =~ ^[yY]$ ]]; then delete_xray_reality_user "$id" "$uuid" || true; else yellow "已取消。"; fi
+        pause_screen
+        ;;
+      0|q|Q) return 0 ;;
+      *) yellow "无效选择。"; pause_screen ;;
+    esac
+  done
+}
+
+xray_reality_inbound_menu() {
+  local id="$1" choice answer address default_address
+  while xray_managed_inbound_exists "$id"; do
+    clear_screen
+    xray_panel_header
+    show_xray_reality_inbound "$id"
+    section_title "入站操作"
+    menu_option 1 "生成客户端配置"
+    menu_option 2 "用户管理"
+    menu_option 3 "修改 SNI / 端口"
+    menu_option 4 "删除入站" danger
+    menu_option q "返回入站列表" back
+    echo
+    read -r -p "请选择: " choice
+    case "$choice" in
+      1)
+        default_address="$(public_ip 4)"
+        if [ -n "$default_address" ]; then
+          read -r -p "服务器地址 [${default_address}]: " address
+          address="${address:-$default_address}"
+        else
+          read -r -p "服务器域名或 IP: " address
+        fi
+        clear_screen
+        show_xray_reality_clients "$id" "$address" || true
+        pause_screen
+        ;;
+      2) xray_reality_users_menu "$id" ;;
+      3) prompt_edit_xray_reality_inbound "$id" || true; pause_screen ;;
+      4)
+        read -r -p "确认删除入站 ${id} 及其全部用户? [y/N] " answer
+        if [[ "$answer" =~ ^[yY]$ ]]; then delete_xray_reality_inbound "$id" || true; else yellow "已取消。"; fi
+        pause_screen
+        ;;
+      0|q|Q) return 0 ;;
+      *) yellow "无效选择。"; pause_screen ;;
+    esac
+  done
+}
+
+xray_inbounds_menu() {
+  local choice id inbound port sni users index
+  local -a ids=()
+  xray_prepare_config_management || { pause_screen; return 1; }
+  while true; do
+    clear_screen
+    xray_panel_header
+    section_title "托管入站"
+    mapfile -t ids < <(xray_managed_inbound_ids)
+    if [ "${#ids[@]}" -eq 0 ]; then
+      printf '  %b暂无托管入站%b\n\n' "$C_YELLOW" "$C_RESET"
+    else
+      for index in "${!ids[@]}"; do
+        id="${ids[$index]}"
+        inbound="$(xray_managed_inbound_json "$id")"
+        port="$(jq -r '.port' <<<"$inbound")"
+        sni="$(jq -r '.streamSettings.realitySettings.serverNames[0]' <<<"$inbound")"
+        users="$(jq -r '.settings.clients | length' <<<"$inbound")"
+        menu_option "$((index + 1))" "VLESS Reality  ·  TCP ${port}  ·  ${users} 用户  ·  ${sni}"
+      done
+      echo
+    fi
+    menu_option a "添加 VLESS Reality 入站" accent
+    menu_option q "返回 Xray 管理" back
+    echo
+    read -r -p "请选择: " choice
+    case "$choice" in
+      a|A) prompt_add_xray_reality_inbound || true; pause_screen ;;
+      0|q|Q) return 0 ;;
+      *)
+        if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && [ "$choice" -le "${#ids[@]}" ]; then
+          xray_reality_inbound_menu "${ids[$((choice - 1))]}"
+        else
+          yellow "无效选择。"; pause_screen
+        fi
+        ;;
+    esac
+  done
+}
+
 xray_service_menu() {
   local choice primary_action primary_label autostart_action autostart_label
   while true; do
@@ -2317,7 +3026,7 @@ xray_menu() {
     xray_panel_header
     section_title "常用操作"
     if xray_is_installed; then
-      menu_option 1 "查看详细状态"
+      menu_option 1 "入站管理"
       menu_option 2 "更新 Xray 核心" accent
       menu_option 3 "服务控制"
       menu_option 4 "查看最近日志"
@@ -2347,7 +3056,7 @@ xray_menu() {
       continue
     fi
     case "$choice" in
-      1) clear_screen; show_xray_status; pause_screen ;;
+      1) xray_inbounds_menu ;;
       2) prompt_xray_install update || true; pause_screen ;;
       3) xray_service_menu ;;
       4) clear_screen; show_xray_logs 100 || true; pause_screen ;;
@@ -2506,6 +3215,15 @@ Xray 核心管理
   enable|disable             控制开机自启
   logs [行数]                查看最近日志（默认 100 行）
   logs-follow                实时跟踪日志
+  inbounds                   列出面板托管的入站
+  reality-add <SNI> [端口] [用户]
+                             添加 VLESS TCP REALITY Vision 入站
+  reality-edit <ID> <SNI> <端口>
+                             修改托管入站的 SNI 和端口
+  reality-client <ID> [地址] 输出 VLESS 链接和 Mihomo 配置
+  reality-delete <ID>        删除托管入站及其用户
+  user-add <ID> <用户>       向托管入站添加用户
+  user-delete <ID> <UUID>    从托管入站删除用户
   uninstall                 卸载核心和服务，保留 config.json
 EOF
 }
@@ -2554,7 +3272,7 @@ Snell 命令:
   SNELL_PORT, SNELL_MODE, SNELL_IPV6, DOWNLOAD_BASE, SNELL_COMMAND_PATH,
   SNELL_MANAGER_URL, XRAY_VERSION, XRAY_RELEASE_API, XRAY_DOWNLOAD_BASE,
   XRAY_BIN_PATH, XRAY_CONFIG_PATH, XRAY_ASSET_DIR, XRAY_LOG_DIR,
-  XRAY_SERVICE_PATH, NO_COLOR
+  XRAY_SERVICE_PATH, XRAY_BACKUP_DIR, NO_COLOR
 
 示例:
   snell v5 install [端口]
@@ -2585,6 +3303,33 @@ if [ "${1:-}" = "xray" ]; then
     start|stop|restart|enable|disable) xray_service_action "$1" ;;
     logs) show_xray_logs "${2:-100}" ;;
     logs-follow) follow_xray_logs ;;
+    inbounds) list_xray_managed_inbounds ;;
+    reality-add)
+      [ -n "${2:-}" ] || { red "用法: snell xray reality-add <SNI> [端口] [用户]"; exit 1; }
+      add_xray_reality_inbound "$2" "${3:-}" "${4:-user1}"
+      ;;
+    reality-edit)
+      if [ -z "${2:-}" ] || [ -z "${3:-}" ] || [ -z "${4:-}" ]; then
+        red "用法: snell xray reality-edit <ID> <SNI> <端口>"; exit 1;
+      fi
+      edit_xray_reality_inbound "$2" "$3" "$4"
+      ;;
+    reality-client)
+      [ -n "${2:-}" ] || { red "用法: snell xray reality-client <ID> [服务器地址]"; exit 1; }
+      show_xray_reality_clients "$2" "${3:-}"
+      ;;
+    reality-delete)
+      [ -n "${2:-}" ] || { red "用法: snell xray reality-delete <ID>"; exit 1; }
+      delete_xray_reality_inbound "$2"
+      ;;
+    user-add)
+      if [ -z "${2:-}" ] || [ -z "${3:-}" ]; then red "用法: snell xray user-add <ID> <用户>"; exit 1; fi
+      add_xray_reality_user "$2" "$3"
+      ;;
+    user-delete)
+      if [ -z "${2:-}" ] || [ -z "${3:-}" ]; then red "用法: snell xray user-delete <ID> <UUID>"; exit 1; fi
+      delete_xray_reality_user "$2" "$3"
+      ;;
     uninstall) uninstall_xray_core ;;
     help|-h|--help) xray_usage ;;
     *) red "未知 Xray 命令: $1"; echo; xray_usage; exit 1 ;;
